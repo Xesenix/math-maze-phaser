@@ -1,0 +1,27 @@
+{
+  "name": "phaser-math-maze",
+  "version": "0.1.0",
+  "description": "This is a puzzle game where you need travers graph of numbers callecting them in to required result to pass to next level.",
+  "private": true,
+  "keywords": [
+    "phaser",
+    "puzzle",
+    "game"
+  ],
+  "dependencies": {
+    "lodash": "^4.15.0",
+    "phaser": "^2.6.1",
+    "random-seed": "^0.3.0"
+  },
+  "devDependencies": {
+    "babelify": "^7.3.0",
+    "grunt": "~0.4.2",
+    "grunt-babel": "^6.0.0",
+    "grunt-browserify": "^5.0.0",
+    "grunt-contrib-copy": "^1.0.0",
+    "grunt-contrib-jshint": "^1.0.0",
+    "grunt-contrib-nodeunit": "^1.0.0",
+    "grunt-contrib-watch": "^1.0.0",
+    "nodeunit": "^0.9.1"
+  }
+}
