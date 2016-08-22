@@ -122,14 +122,19 @@ Intro.prototype = {
 		this.sprite = this.game.add.sprite(this.game.world.centerX, 180, 'math-maze-logo');
 		this.sprite.anchor.setTo(0.5, 0.5);
 
-		this.titleText = this.game.add.text(this.game.world.centerX, 340, 'Math Maze', style);
+		this.titleText = this.game.add.text(this.game.world.centerX, 360, 'Math Maze', style);
 		this.titleText.anchor.setTo(0.5, 0.5);
 
-		this.instructionsText = this.game.add.text(this.game.world.centerX, 420, 'Click anywhere to play "Math Maze"', { font: '32px VT323', fill: '#ffffff', align: 'center'});
+		this.authorText = this.game.add.text(this.game.world.centerX, 420, 'Game by Xesenix', { font: '36px VT323', fill: '#ffffff', align: 'center'});
+		this.authorText.anchor.setTo(0.5, 0.5);
+
+		this.instructionsText = this.game.add.text(this.game.world.centerX, 460, 'Click anywhere to play "Math Maze"', { font: '24px VT323', fill: '#dddddd', align: 'center'});
 		this.instructionsText.anchor.setTo(0.5, 0.5);
 
-		this.sprite.angle = -20;
-		this.game.add.tween(this.sprite).to({angle: 20}, 1000, Phaser.Easing.Linear.NONE, true, 0, 1000, true);
+		this.game.add.tween(this.sprite).from({ y: -120 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+		this.game.add.tween(this.titleText).from({ y: this.game.world.height + 40}, 500, Phaser.Easing.Linear.NONE, true, 500, 0, false);
+		this.game.add.tween(this.authorText).from({ alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 1000, 0, false);
+		this.game.add.tween(this.instructionsText).from({ alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 1500, 0, false);
 	},
 	update: function() {
 		if (this.game.input.activePointer.justPressed()) {

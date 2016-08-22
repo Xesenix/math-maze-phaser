@@ -38692,6 +38692,7 @@ Finish.prototype = {
 		this.points = 0;
 	},
 	create: function () {
+		this.createBackground();
 		var bonus = '';
 		
 		this.nextKey = this.game.input.keyboard.addKey(Phaser.Keyboard.SPACEBAR);
@@ -38734,18 +38735,56 @@ Finish.prototype = {
 			this.pointsText = this.game.add.text(this.game.world.centerX, 400, 'You earned ' + this.points + ' points', { font: '40px VT323', fill: '#ffffff', align: 'center'});
 			this.pointsText.anchor.setTo(0.5, 0.5);
 
-			this.instructionText = this.game.add.text(this.game.world.centerX, 500, 'Click Space to play next level\nClick R to repeat for better score!', { font: '24px VT323', fill: '#ffffff', align: 'center'});
+			this.instructionText = this.game.add.text(this.game.world.centerX, 500, 'Click Space to play next level\nClick R to repeat for better score!', { font: '24px VT323', fill: '#dddddd', align: 'center'});
 			this.instructionText.anchor.setTo(0.5, 0.5);
+			
+			this.game.add.tween(this.titleText).from({ alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+			this.game.add.tween(this.congratsText).from({ alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 500, 0, false);
+			this.game.add.tween(this.bonusText).from({ alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 800, 0, false);
+			this.game.add.tween(this.pointsText).from({ alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 1200, 0, false);
+			this.game.add.tween(this.instructionText).from({ alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 1500, 0, false);
 		} else {
 			this.titleText = this.game.add.text(this.game.world.centerX, 100, 'Fail', { font: '64px VT323', fill: '#ff0000', align: 'center'});
 			this.titleText.anchor.setTo(0.5, 0.5);
 
-			this.congratsText = this.game.add.text(this.game.world.centerX, 200, 'You overshot ' + this.result.value + ' target ' + this.target.value + '!', { font: '48px VT323', fill: '#ffffff', align: 'center'});
+			this.congratsText = this.game.add.text(this.game.world.centerX, 300, 'You overshot ' + this.result.value + ' target ' + this.target.value + '!', { font: '48px VT323', fill: '#ffffff', align: 'center'});
 			this.congratsText.anchor.setTo(0.5, 0.5);
 
-			this.instructionText = this.game.add.text(this.game.world.centerX, 300, 'Click Space to repeat level ' + this.level, { font: '32px VT323', fill: '#ffffff', align: 'center'});
+			this.instructionText = this.game.add.text(this.game.world.centerX, 500, 'Click Space to repeat level ' + this.level, { font: '24px VT323', fill: '#dddddd', align: 'center'});
 			this.instructionText.anchor.setTo(0.5, 0.5);
+			
+			this.game.add.tween(this.titleText).from({ alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+			this.game.add.tween(this.congratsText).from({ alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 500, 0, false);
+			this.game.add.tween(this.instructionText).from({ alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 1000, 0, false);
 		}
+	},
+	createBackground: function() {
+		this.background = this.game.add.graphics(0, 0);
+		this.background.beginFill(0x0a2d40);
+		this.background.drawRect(30, 0, this.game.world.width - 60, this.game.world.height);
+		this.background.endFill();
+		this.background.beginFill(0x0c3953);
+		this.background.drawRect(60, 0, this.game.world.width - 120, this.game.world.height);
+		this.background.endFill();
+		
+		//this.game.add.tween(this.background).from({ y: this.game.world.height, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+		
+		this.subbar = this.game.add.graphics(0, 0);
+		this.subbar.beginFill(0x008050);
+		this.subbar.drawRect(0, 40, this.game.world.width, 120);
+		this.subbar.endFill();
+		this.subbar.beginFill(0x000000);
+		this.subbar.drawRect(0, 45, this.game.world.width, 110);
+		this.subbar.endFill();
+		
+		this.game.add.tween(this.subbar).from({ y: this.subbar.y - 40 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+		
+		this.topbar = this.game.add.graphics(0, 0);
+		this.topbar.beginFill(0x006030);
+		this.topbar.drawRect(0, -40, this.game.world.width, 80);
+		this.topbar.endFill();
+		
+		this.game.add.tween(this.topbar).from({ y: this.topbar.y + 40 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
 	},
 	update: function () {
 		if (this.game.input.activePointer.justPressed()) {
@@ -38921,14 +38960,19 @@ Intro.prototype = {
 		this.sprite = this.game.add.sprite(this.game.world.centerX, 180, 'math-maze-logo');
 		this.sprite.anchor.setTo(0.5, 0.5);
 
-		this.titleText = this.game.add.text(this.game.world.centerX, 340, 'Math Maze', style);
+		this.titleText = this.game.add.text(this.game.world.centerX, 360, 'Math Maze', style);
 		this.titleText.anchor.setTo(0.5, 0.5);
 
-		this.instructionsText = this.game.add.text(this.game.world.centerX, 420, 'Click anywhere to play "Math Maze"', { font: '32px VT323', fill: '#ffffff', align: 'center'});
+		this.authorText = this.game.add.text(this.game.world.centerX, 420, 'Game by Xesenix', { font: '36px VT323', fill: '#ffffff', align: 'center'});
+		this.authorText.anchor.setTo(0.5, 0.5);
+
+		this.instructionsText = this.game.add.text(this.game.world.centerX, 460, 'Click anywhere to play "Math Maze"', { font: '24px VT323', fill: '#dddddd', align: 'center'});
 		this.instructionsText.anchor.setTo(0.5, 0.5);
 
-		this.sprite.angle = -20;
-		this.game.add.tween(this.sprite).to({angle: 20}, 1000, Phaser.Easing.Linear.NONE, true, 0, 1000, true);
+		this.game.add.tween(this.sprite).from({ y: -120 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+		this.game.add.tween(this.titleText).from({ y: this.game.world.height + 40}, 500, Phaser.Easing.Linear.NONE, true, 500, 0, false);
+		this.game.add.tween(this.authorText).from({ alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 1000, 0, false);
+		this.game.add.tween(this.instructionsText).from({ alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 1500, 0, false);
 	},
 	update: function() {
 		if (this.game.input.activePointer.justPressed()) {
@@ -38955,16 +38999,10 @@ Menu.prototype = {
 
 	},
 	create: function() {
-		var style = { font: '64px VT323', fill: '#ffffff', align: 'center'};
-		//this.sprite = this.game.add.sprite(this.game.world.centerX, 10, 'math-maze-logo');
-		//this.sprite.anchor.setTo(0.5, 0);
-
-		this.titleLabel = this.game.add.text(this.game.world.centerX, 40, 'Math Maze', style);
-		this.titleLabel.anchor.setTo(0.5, 0.5);
-
-		this.scoreLabel = this.game.add.text(this.game.world.centerX, 100, 'Score: ' + _.sum(_.map(this.game.mode, 'points')), { font: '48px VT323', fill: '#ffffff', align: 'center'});
-		this.scoreLabel.anchor.setTo(0.5, 0.5);
-		
+		this.setupKeyboard();
+		this.createInterface();
+	},
+	setupKeyboard: function() {
 		this.easyKey = this.game.input.keyboard.addKey(Phaser.Keyboard.ONE);
 		this.easyKey.onDown.add(_.bind(function() { this.game.state.start('play', true, false, this.game.mode.easy.unlocked, this.game.mode.easy);}, this));
 		
@@ -38976,37 +39014,85 @@ Menu.prototype = {
 		
 		this.insaneKey = this.game.input.keyboard.addKey(Phaser.Keyboard.FOUR);
 		this.insaneKey.onDown.add(_.bind(function() { this.game.state.start('play', true, false, this.game.mode.insane.unlocked, this.game.mode.insane);}, this));
-		
-		this.easyButton = this.createMenuButton(
-			'Easy level ' + this.game.mode.easy.unlocked, 
-			_.bind(function() { this.game.state.start('play', true, false, this.game.mode.easy.unlocked, this.game.mode.easy);}, this)
-		);
-		this.mediumButton = this.createMenuButton(
-			'Medium level ' + this.game.mode.medium.unlocked,
-			_.bind(function() {this.game.state.start('play', true, false, this.game.mode.medium.unlocked, this.game.mode.medium);}, this)
-		);
-		this.hardButton = this.createMenuButton(
-			'Hard level ' + this.game.mode.hard.unlocked,
-			_.bind(function() {this.game.state.start('play', true, false, this.game.mode.hard.unlocked, this.game.mode.hard);}, this)
-		);
-		this.insaneButton = this.createMenuButton(
-			'Insane level ' + this.game.mode.insane.unlocked,
-			_.bind(function() {this.game.state.start('play', true, false, this.game.mode.insane.unlocked, this.game.mode.insane);}, this)
-		);
-		
-		this.resetButton = this.createMenuButton('Reset progress ', _.bind(this.resetProgress, this));
-		this.resetButton.tint = 0xff4040;
 	},
 	createMenuButton: function(label, callback) {
 		var button = new LabelButton(this.game, this.world.centerX, 200 + 80 * (this.menuItemIndex++), 'btn', label, callback, this, this);
 		button.anchor.setTo(0.5, 0.5);
-		button.width = 240;	
+		button.width = 360;	
 		button.height = 72;
-		button.label.setStyle({ font: '32px VT323', fill: '#000000' }, true);
+		button.label.setStyle({ font: '24px VT323', fill: '#000000', align: 'center' }, true);
 		
 		this.game.world.add(button);
 		
 		return button;
+	},
+	createBackground: function() {
+		this.background = this.game.add.graphics(0, 0);
+		this.background.beginFill(0x0a2d40);
+		this.background.drawRect(30, 0, this.game.world.width - 60, this.game.world.height);
+		this.background.endFill();
+		this.background.beginFill(0x0c3953);
+		this.background.drawRect(60, 0, this.game.world.width - 120, this.game.world.height);
+		this.background.endFill();
+		
+		this.game.add.tween(this.background).from({ y: this.game.world.height, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+		
+		this.topbar = this.game.add.graphics(0, 0);
+		this.topbar.beginFill(0x006030);
+		this.topbar.drawRect(0, 0, this.game.world.width, 80);
+		this.topbar.endFill();
+		this.topbar.beginFill(0x008050);
+		this.topbar.drawRect(0, 80, this.game.world.width, 40);
+		this.topbar.endFill();
+		
+		this.game.add.tween(this.topbar).from({ x: this.game.world.width, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 500, 0, false);
+	},
+	createMenu: function() {
+		this.easyButton = this.createMenuButton(
+			'Easy (numbers 1-3)\nunlocked level ' + this.game.mode.easy.unlocked, 
+			_.bind(function() { this.game.state.start('play', true, false, this.game.mode.easy.unlocked, this.game.mode.easy);}, this)
+		);
+		this.easyButton.tint = 0xffbb60;
+		
+		this.mediumButton = this.createMenuButton(
+			'Medium (numbers 1-5)\nunlocked level ' + this.game.mode.medium.unlocked,
+			_.bind(function() {this.game.state.start('play', true, false, this.game.mode.medium.unlocked, this.game.mode.medium);}, this)
+		);
+		this.mediumButton.tint = 0xffbb60;
+		
+		this.hardButton = this.createMenuButton(
+			'Hard (numbers 1-7)\nunlocked level ' + this.game.mode.hard.unlocked,
+			_.bind(function() {this.game.state.start('play', true, false, this.game.mode.hard.unlocked, this.game.mode.hard);}, this)
+		);
+		this.hardButton.tint = 0xffbb60;
+		
+		this.insaneButton = this.createMenuButton(
+			'Insane (numbers 1-9)\nunlocked level ' + this.game.mode.insane.unlocked,
+			_.bind(function() {this.game.state.start('play', true, false, this.game.mode.insane.unlocked, this.game.mode.insane);}, this)
+		);
+		this.insaneButton.tint = 0xffbb60;
+		
+		this.resetButton = this.createMenuButton('Reset progress ', _.bind(this.resetProgress, this));
+		this.resetButton.tint = 0xff4040;
+		
+		this.game.add.tween(this.easyButton).from({ x: -320}, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+		this.game.add.tween(this.mediumButton).from({ x: -320}, 500, Phaser.Easing.Linear.NONE, true, 100, 0, false);
+		this.game.add.tween(this.hardButton).from({ x: -320}, 500, Phaser.Easing.Linear.NONE, true, 200, 0, false);
+		this.game.add.tween(this.insaneButton).from({ x: -320}, 500, Phaser.Easing.Linear.NONE, true, 300, 0, false);
+		this.game.add.tween(this.resetButton).from({ y: this.game.world.height + 40 }, 500, Phaser.Easing.Linear.NONE, true, 800, 0, false);
+	},
+	createInterface: function() {
+		this.createBackground();
+		this.createMenu();
+		
+		this.titleLabel = this.game.add.text(this.game.world.centerX, 40, 'Math Maze', { font: '64px VT323', fill: '#ffffff', align: 'center'});
+		this.titleLabel.anchor.setTo(0.5, 0.5);
+
+		this.scoreLabel = this.game.add.text(this.game.world.centerX, 100, 'Score: ' + _.sum(_.map(this.game.mode, 'points')), { font: '48px VT323', fill: '#ffffff', align: 'center'});
+		this.scoreLabel.anchor.setTo(0.5, 0.5);
+		
+		this.game.add.tween(this.titleLabel).from({ alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 800, 0, false);
+		this.game.add.tween(this.scoreLabel).from({ alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 1200, 0, false);
 	},
 	resetProgress: function() {
 		console.log('resetProgress');
@@ -39019,12 +39105,18 @@ Menu.prototype = {
 		this.game.mode.insane.unlocked = 1;
 		this.game.mode.insane.points = 0;
 		
-		this.easyButton.label.text = 'Easy level ' + this.game.mode.easy.unlocked;
-		this.mediumButton.label.text = 'Medium level ' + this.game.mode.medium.unlocked;
-		this.hardButton.label.text = 'Hard level ' + this.game.mode.hard.unlocked;
-		this.insaneButton.label.text = 'Insane level ' + this.game.mode.insane.unlocked;
+		this.easyButton.label.text = 'Easy (numbers 1-3)\nunlocked level ' + this.game.mode.easy.unlocked;
+		this.mediumButton.label.text = 'Medium (numbers 1-5)\nunlocked level ' + this.game.mode.medium.unlocked;
+		this.hardButton.label.text = 'Hard (numbers 1-7)\nunlocked level ' + this.game.mode.hard.unlocked;
+		this.insaneButton.label.text = 'Insane (numbers 1-9)\nunlocked level ' + this.game.mode.insane.unlocked;
 		
 		this.scoreLabel.text = 'Score: ' + _.sum(_.map(this.game.mode, 'points'));
+		
+		this.game.add.tween(this.scoreLabel).from({ x: this.scoreLabel.x - 10}, 100, Phaser.Easing.Linear.InOut, true, 0, 1, true);
+		this.game.add.tween(this.easyButton).to({ x: this.easyButton.x - 10}, 100, Phaser.Easing.Linear.InOut, true, 50, 1, true);
+		this.game.add.tween(this.mediumButton).to({ x: this.mediumButton.x - 10}, 100, Phaser.Easing.Linear.InOut, true, 100, 1, true);
+		this.game.add.tween(this.hardButton).to({ x: this.hardButton.x - 10}, 100, Phaser.Easing.Linear.InOut, true, 150, 1, true);
+		this.game.add.tween(this.insaneButton).to({ x: this.insaneButton.x - 10}, 100, Phaser.Easing.Linear.InOut, true, 200, 1, true);
 		
 		localStorage.setItem('gameSave', JSON.stringify({}));
 	},
@@ -39081,20 +39173,6 @@ Play.prototype = {
 	create: function () {
 		this.setupKeyboard();
 		this.createInterface();
-
-		this.restartButton = new LabelButton(this.game, 140, this.world.height - 10, 'btn', 'Restart (R)', _.bind(this.reset, this), this);
-		this.restartButton.anchor.setTo(0, 1);
-		this.restartButton.width = 200;	
-		this.restartButton.height = 60;
-		this.restartButton.label.setStyle({ font: '32px VT323', fill: '#000000' }, true);
-		this.game.world.add(this.restartButton);
-		
-		this.menuButton = new LabelButton(this.game, 10, this.world.height - 10, 'btn', 'Menu', _.bind(this.menu, this), this);
-		this.menuButton.anchor.setTo(0, 1);
-		this.menuButton.width = 120;	
-		this.menuButton.height = 60;
-		this.menuButton.label.setStyle({ font: '32px VT323', fill: '#000000' }, true);
-		this.game.world.add(this.menuButton);
 		
 		//this.pointer = this.game.add.sprite(this.offsetX + this.position.x * tileSize - 32, this.offsetY + this.position.y * tileSize - 32, 'pointer');
 		//this.pointer.scale.setTo(192 / 256 * scale, 192 / 256 * scale);
@@ -39133,23 +39211,33 @@ Play.prototype = {
 				this.node[x][y] = node;
 				
 				this.boardGroup.add(tile);
+				
+				this.game.add.tween(tile).from({ x: x * this.tileSize + 100, alpha: 0 }, 400, Phaser.Easing.Linear.NONE, true, (x * this.levelConfig.sizeY + y) * 50, 0, false);
 			}
 		}
 	},
 	createBackground: function() {
 		this.background = this.game.add.graphics(0, 0);
 		this.background.beginFill(0x0a2d40);
-		this.background.drawRect(30, 120, this.game.world.width - 60, this.game.world.height - 80);
+		this.background.drawRect(30, 0, this.game.world.width - 60, this.game.world.height);
 		this.background.endFill();
 		this.background.beginFill(0x0c3953);
-		this.background.drawRect(60, 120, this.game.world.width - 120, this.game.world.height - 80);
+		this.background.drawRect(60, 0, this.game.world.width - 120, this.game.world.height);
 		this.background.endFill();
-		this.background.beginFill(0x006030);
-		this.background.drawRect(0, 0, this.game.world.width, 40);
-		this.background.endFill();
-		this.background.beginFill(0x008050);
-		this.background.drawRect(0, 40, this.game.world.width, 80);
-		this.background.endFill();
+		
+		//this.game.add.tween(this.background).from({ y: this.game.world.height, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+		
+		this.subbar = this.game.add.graphics(0, 0);
+		this.subbar.beginFill(0x008050);
+		this.subbar.drawRect(0, 40, this.game.world.width, 80);
+		this.subbar.endFill();
+		
+		this.topbar = this.game.add.graphics(0, 0);
+		this.topbar.beginFill(0x006030);
+		this.topbar.drawRect(0, -40, this.game.world.width, 80);
+		this.topbar.endFill();
+		
+		this.game.add.tween(this.topbar).from({ y: this.topbar.y + 40 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
 	},
 	draw: {
 		plus: function(graphics, x, y, size) {
@@ -39189,6 +39277,7 @@ Play.prototype = {
 	createPointer: function() {
 		this.pointer = this.game.add.graphics(0, 0);
 		this.redrawPointer();
+		this.game.add.tween(this.pointer).from({ alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, this.levelConfig.sizeX * this.levelConfig.sizeY * 100, 0, false);
 	},
 	createInterface: function() {
 		this.createBackground();
@@ -39218,6 +39307,33 @@ Play.prototype = {
 		this.bonusStepsLabel = this.game.add.text(this.game.world.width - 20, 105, 'Steps for bonus: ' + this.target.steps + ' or less', { font: '20px VT323', fill: '#ffffff' });
 		this.bonusStepsLabel.anchor.setTo(1, 0.5);
 		this.bonusStepsLabel.setShadow(3, 3, 'rgba(0,0,0,0.5)', 2);
+		
+		this.restartButton = new LabelButton(this.game, this.world.centerX - 5, this.world.height - 10, 'btn', 'Restart (R)', _.bind(this.reset, this), this);
+		this.restartButton.anchor.setTo(1, 1);
+		this.restartButton.width = 200;	
+		this.restartButton.height = 60;
+		this.restartButton.tint = 0xffbb60;
+		this.restartButton.label.setStyle({ font: '32px VT323', fill: '#000000' }, true);
+		this.game.world.add(this.restartButton);
+		
+		this.menuButton = new LabelButton(this.game, this.world.centerX + 5, this.world.height - 10, 'btn', 'Menu (ESC)', _.bind(this.menu, this), this);
+		this.menuButton.anchor.setTo(0, 1);
+		this.menuButton.width = 200;	
+		this.menuButton.height = 60;
+		this.menuButton.tint = 0xffbb60;
+		this.menuButton.label.setStyle({ font: '32px VT323', fill: '#000000' }, true);
+		this.game.world.add(this.menuButton);
+		
+		this.game.add.tween(this.levelLabel).from({ x: this.levelLabel.x - 100, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 500, 0, false);
+		this.game.add.tween(this.resultLabel).from({ x: this.resultLabel.x - 100, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 500, 0, false);
+		this.game.add.tween(this.stepsLabel).from({ x: this.stepsLabel.x - 100, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 500, 0, false);
+		
+		this.game.add.tween(this.scoreLabel).from({ x: this.scoreLabel.x + 100, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 500, 0, false);
+		this.game.add.tween(this.targetLabel).from({ x: this.targetLabel.x + 100, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 500, 0, false);
+		this.game.add.tween(this.bonusStepsLabel).from({ x: this.bonusStepsLabel.x + 100, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 500, 0, false);
+		
+		this.game.add.tween(this.menuButton).from({ y: this.menuButton.y + 100, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 500, 0, false);
+		this.game.add.tween(this.restartButton).from({ y: this.restartButton.y + 100, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 500, 0, false);
 
 		//this.infoLabel = this.game.add.text(this.game.world.width - 10, this.game.world.height, 'Press R to restart', style);
 		//this.infoLabel.anchor.setTo(1, 1);

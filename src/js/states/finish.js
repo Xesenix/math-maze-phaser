@@ -19,6 +19,7 @@ Finish.prototype = {
 		this.points = 0;
 	},
 	create: function () {
+		this.createBackground();
 		var bonus = '';
 		
 		this.nextKey = this.game.input.keyboard.addKey(Phaser.Keyboard.SPACEBAR);
@@ -61,18 +62,56 @@ Finish.prototype = {
 			this.pointsText = this.game.add.text(this.game.world.centerX, 400, 'You earned ' + this.points + ' points', { font: '40px VT323', fill: '#ffffff', align: 'center'});
 			this.pointsText.anchor.setTo(0.5, 0.5);
 
-			this.instructionText = this.game.add.text(this.game.world.centerX, 500, 'Click Space to play next level\nClick R to repeat for better score!', { font: '24px VT323', fill: '#ffffff', align: 'center'});
+			this.instructionText = this.game.add.text(this.game.world.centerX, 500, 'Click Space to play next level\nClick R to repeat for better score!', { font: '24px VT323', fill: '#dddddd', align: 'center'});
 			this.instructionText.anchor.setTo(0.5, 0.5);
+			
+			this.game.add.tween(this.titleText).from({ alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+			this.game.add.tween(this.congratsText).from({ alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 500, 0, false);
+			this.game.add.tween(this.bonusText).from({ alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 800, 0, false);
+			this.game.add.tween(this.pointsText).from({ alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 1200, 0, false);
+			this.game.add.tween(this.instructionText).from({ alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 1500, 0, false);
 		} else {
 			this.titleText = this.game.add.text(this.game.world.centerX, 100, 'Fail', { font: '64px VT323', fill: '#ff0000', align: 'center'});
 			this.titleText.anchor.setTo(0.5, 0.5);
 
-			this.congratsText = this.game.add.text(this.game.world.centerX, 200, 'You overshot ' + this.result.value + ' target ' + this.target.value + '!', { font: '48px VT323', fill: '#ffffff', align: 'center'});
+			this.congratsText = this.game.add.text(this.game.world.centerX, 300, 'You overshot ' + this.result.value + ' target ' + this.target.value + '!', { font: '48px VT323', fill: '#ffffff', align: 'center'});
 			this.congratsText.anchor.setTo(0.5, 0.5);
 
-			this.instructionText = this.game.add.text(this.game.world.centerX, 300, 'Click Space to repeat level ' + this.level, { font: '32px VT323', fill: '#ffffff', align: 'center'});
+			this.instructionText = this.game.add.text(this.game.world.centerX, 500, 'Click Space to repeat level ' + this.level, { font: '24px VT323', fill: '#dddddd', align: 'center'});
 			this.instructionText.anchor.setTo(0.5, 0.5);
+			
+			this.game.add.tween(this.titleText).from({ alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+			this.game.add.tween(this.congratsText).from({ alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 500, 0, false);
+			this.game.add.tween(this.instructionText).from({ alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 1000, 0, false);
 		}
+	},
+	createBackground: function() {
+		this.background = this.game.add.graphics(0, 0);
+		this.background.beginFill(0x0a2d40);
+		this.background.drawRect(30, 0, this.game.world.width - 60, this.game.world.height);
+		this.background.endFill();
+		this.background.beginFill(0x0c3953);
+		this.background.drawRect(60, 0, this.game.world.width - 120, this.game.world.height);
+		this.background.endFill();
+		
+		//this.game.add.tween(this.background).from({ y: this.game.world.height, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+		
+		this.subbar = this.game.add.graphics(0, 0);
+		this.subbar.beginFill(0x008050);
+		this.subbar.drawRect(0, 40, this.game.world.width, 120);
+		this.subbar.endFill();
+		this.subbar.beginFill(0x000000);
+		this.subbar.drawRect(0, 45, this.game.world.width, 110);
+		this.subbar.endFill();
+		
+		this.game.add.tween(this.subbar).from({ y: this.subbar.y - 40 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+		
+		this.topbar = this.game.add.graphics(0, 0);
+		this.topbar.beginFill(0x006030);
+		this.topbar.drawRect(0, -40, this.game.world.width, 80);
+		this.topbar.endFill();
+		
+		this.game.add.tween(this.topbar).from({ y: this.topbar.y + 40 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
 	},
 	update: function () {
 		if (this.game.input.activePointer.justPressed()) {

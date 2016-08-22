@@ -43,20 +43,6 @@ Play.prototype = {
 	create: function () {
 		this.setupKeyboard();
 		this.createInterface();
-
-		this.restartButton = new LabelButton(this.game, 140, this.world.height - 10, 'btn', 'Restart (R)', _.bind(this.reset, this), this);
-		this.restartButton.anchor.setTo(0, 1);
-		this.restartButton.width = 200;	
-		this.restartButton.height = 60;
-		this.restartButton.label.setStyle({ font: '32px VT323', fill: '#000000' }, true);
-		this.game.world.add(this.restartButton);
-		
-		this.menuButton = new LabelButton(this.game, 10, this.world.height - 10, 'btn', 'Menu', _.bind(this.menu, this), this);
-		this.menuButton.anchor.setTo(0, 1);
-		this.menuButton.width = 120;	
-		this.menuButton.height = 60;
-		this.menuButton.label.setStyle({ font: '32px VT323', fill: '#000000' }, true);
-		this.game.world.add(this.menuButton);
 		
 		//this.pointer = this.game.add.sprite(this.offsetX + this.position.x * tileSize - 32, this.offsetY + this.position.y * tileSize - 32, 'pointer');
 		//this.pointer.scale.setTo(192 / 256 * scale, 192 / 256 * scale);
@@ -95,23 +81,33 @@ Play.prototype = {
 				this.node[x][y] = node;
 				
 				this.boardGroup.add(tile);
+				
+				this.game.add.tween(tile).from({ x: x * this.tileSize + 100, alpha: 0 }, 400, Phaser.Easing.Linear.NONE, true, (x * this.levelConfig.sizeY + y) * 50, 0, false);
 			}
 		}
 	},
 	createBackground: function() {
 		this.background = this.game.add.graphics(0, 0);
 		this.background.beginFill(0x0a2d40);
-		this.background.drawRect(30, 120, this.game.world.width - 60, this.game.world.height - 80);
+		this.background.drawRect(30, 0, this.game.world.width - 60, this.game.world.height);
 		this.background.endFill();
 		this.background.beginFill(0x0c3953);
-		this.background.drawRect(60, 120, this.game.world.width - 120, this.game.world.height - 80);
+		this.background.drawRect(60, 0, this.game.world.width - 120, this.game.world.height);
 		this.background.endFill();
-		this.background.beginFill(0x006030);
-		this.background.drawRect(0, 0, this.game.world.width, 40);
-		this.background.endFill();
-		this.background.beginFill(0x008050);
-		this.background.drawRect(0, 40, this.game.world.width, 80);
-		this.background.endFill();
+		
+		//this.game.add.tween(this.background).from({ y: this.game.world.height, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+		
+		this.subbar = this.game.add.graphics(0, 0);
+		this.subbar.beginFill(0x008050);
+		this.subbar.drawRect(0, 40, this.game.world.width, 80);
+		this.subbar.endFill();
+		
+		this.topbar = this.game.add.graphics(0, 0);
+		this.topbar.beginFill(0x006030);
+		this.topbar.drawRect(0, -40, this.game.world.width, 80);
+		this.topbar.endFill();
+		
+		this.game.add.tween(this.topbar).from({ y: this.topbar.y + 40 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
 	},
 	draw: {
 		plus: function(graphics, x, y, size) {
@@ -151,6 +147,7 @@ Play.prototype = {
 	createPointer: function() {
 		this.pointer = this.game.add.graphics(0, 0);
 		this.redrawPointer();
+		this.game.add.tween(this.pointer).from({ alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, this.levelConfig.sizeX * this.levelConfig.sizeY * 100, 0, false);
 	},
 	createInterface: function() {
 		this.createBackground();
@@ -180,6 +177,33 @@ Play.prototype = {
 		this.bonusStepsLabel = this.game.add.text(this.game.world.width - 20, 105, 'Steps for bonus: ' + this.target.steps + ' or less', { font: '20px VT323', fill: '#ffffff' });
 		this.bonusStepsLabel.anchor.setTo(1, 0.5);
 		this.bonusStepsLabel.setShadow(3, 3, 'rgba(0,0,0,0.5)', 2);
+		
+		this.restartButton = new LabelButton(this.game, this.world.centerX - 5, this.world.height - 10, 'btn', 'Restart (R)', _.bind(this.reset, this), this);
+		this.restartButton.anchor.setTo(1, 1);
+		this.restartButton.width = 200;	
+		this.restartButton.height = 60;
+		this.restartButton.tint = 0xffbb60;
+		this.restartButton.label.setStyle({ font: '32px VT323', fill: '#000000' }, true);
+		this.game.world.add(this.restartButton);
+		
+		this.menuButton = new LabelButton(this.game, this.world.centerX + 5, this.world.height - 10, 'btn', 'Menu (ESC)', _.bind(this.menu, this), this);
+		this.menuButton.anchor.setTo(0, 1);
+		this.menuButton.width = 200;	
+		this.menuButton.height = 60;
+		this.menuButton.tint = 0xffbb60;
+		this.menuButton.label.setStyle({ font: '32px VT323', fill: '#000000' }, true);
+		this.game.world.add(this.menuButton);
+		
+		this.game.add.tween(this.levelLabel).from({ x: this.levelLabel.x - 100, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 500, 0, false);
+		this.game.add.tween(this.resultLabel).from({ x: this.resultLabel.x - 100, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 500, 0, false);
+		this.game.add.tween(this.stepsLabel).from({ x: this.stepsLabel.x - 100, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 500, 0, false);
+		
+		this.game.add.tween(this.scoreLabel).from({ x: this.scoreLabel.x + 100, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 500, 0, false);
+		this.game.add.tween(this.targetLabel).from({ x: this.targetLabel.x + 100, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 500, 0, false);
+		this.game.add.tween(this.bonusStepsLabel).from({ x: this.bonusStepsLabel.x + 100, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 500, 0, false);
+		
+		this.game.add.tween(this.menuButton).from({ y: this.menuButton.y + 100, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 500, 0, false);
+		this.game.add.tween(this.restartButton).from({ y: this.restartButton.y + 100, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 500, 0, false);
 
 		//this.infoLabel = this.game.add.text(this.game.world.width - 10, this.game.world.height, 'Press R to restart', style);
 		//this.infoLabel.anchor.setTo(1, 1);
