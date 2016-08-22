@@ -2,23 +2,6 @@
 /* global Phaser */
 var _ = require('lodash');
 
-var difficulty = {
-	maxNumber: 3, // 2-9
-	sizeX: 4,
-	sizeY: 3,
-	vertical: function (result, nodeValue) {
-		return result.value * nodeValue;
-	},
-	horizontal: function (result, nodeValue) {
-		return result.value + nodeValue;
-	},
-	moves: [
-		"P,D,L,G,P,P,D,D,P",
-		"D,P,D,G,P,P,D,L,P",
-		"D,D,P,P,G,L,G,P,P"
-	]
-};
-
 var Board = require('./../components/board.js');
 var Bot = require('./../mathmaze/bot.js');
 var LabelButton = require('./../components/label_button.js');
@@ -27,19 +10,24 @@ var LabelButton = require('./../components/label_button.js');
 function Play() {}
 
 Play.prototype = {
-	init: function(level) {
-		console.log('Play', level);
+	init: function(level, difficulty) {
+		console.log('Play', level, difficulty);
 		this.level = level || 1;
 		
+		this.difficulty = difficulty;
+		
 		this.levelConfig = _.extend({
-			seed: this.level
-		}, difficulty);
+			level: this.level,
+			steps: Math.floor(this.level / 3) + 3
+		}, this.difficulty.config);
 		
 		this.tileBaseSize = 128;
-		this.tileSize = 128;
-		this.boardWidth = difficulty.sizeX * this.tileSize;
+		this.tileSize = 112;
+		this.boardWidth = this.levelConfig.sizeX * this.tileSize;
 		this.offsetX = (this.world.width - this.boardWidth) / 2;
-		this.offsetY = 120;
+		this.offsetY = 140;
+		
+		this.steps = 0;
 
 		this.position = {
 			x: 0,
@@ -50,7 +38,7 @@ Play.prototype = {
 
 		var bot = new Bot(this.levelConfig.vertical, this.levelConfig.horizontal);
 
-		this.target = bot.traverse(this.levelConfig.moves[this.level % this.levelConfig.moves.length], this.board);
+		this.target = bot.traverse(this.levelConfig.steps, this.levelConfig.moves[this.level % this.levelConfig.moves.length], this.board);
 	},
 	create: function () {
 		this.setupKeyboard();
@@ -63,7 +51,7 @@ Play.prototype = {
 		this.restartButton.label.setStyle({ font: '32px VT323', fill: '#000000' }, true);
 		this.game.world.add(this.restartButton);
 		
-		this.menuButton = new LabelButton(this.game, 10, this.world.height - 10, 'btn', 'Menu', _.bind(function() {this.game.state.start('menu');}, this), this);
+		this.menuButton = new LabelButton(this.game, 10, this.world.height - 10, 'btn', 'Menu', _.bind(this.menu, this), this);
 		this.menuButton.anchor.setTo(0, 1);
 		this.menuButton.width = 120;	
 		this.menuButton.height = 60;
@@ -77,6 +65,9 @@ Play.prototype = {
 	setupKeyboard: function() {
 		this.resetKey = this.game.input.keyboard.addKey(Phaser.Keyboard.R);
 		this.resetKey.onDown.add(_.bind(this.reset, this));
+		
+		this.menuKey = this.game.input.keyboard.addKey(Phaser.Keyboard.ESC);
+		this.menuKey.onDown.add(_.bind(this.menu, this));
 
 		this.game.input.keyboard.onUpCallback = _.bind(this.onKeyboard, this);
 	},
@@ -110,13 +101,16 @@ Play.prototype = {
 	createBackground: function() {
 		this.background = this.game.add.graphics(0, 0);
 		this.background.beginFill(0x0a2d40);
-		this.background.drawRect(30, 80, this.game.world.width - 60, this.game.world.height - 80);
+		this.background.drawRect(30, 120, this.game.world.width - 60, this.game.world.height - 80);
 		this.background.endFill();
 		this.background.beginFill(0x0c3953);
-		this.background.drawRect(60, 80, this.game.world.width - 120, this.game.world.height - 80);
+		this.background.drawRect(60, 120, this.game.world.width - 120, this.game.world.height - 80);
 		this.background.endFill();
-		this.background.beginFill(0x03996d);
-		this.background.drawRect(0, 0, this.game.world.width, 80);
+		this.background.beginFill(0x006030);
+		this.background.drawRect(0, 0, this.game.world.width, 40);
+		this.background.endFill();
+		this.background.beginFill(0x008050);
+		this.background.drawRect(0, 40, this.game.world.width, 80);
 		this.background.endFill();
 	},
 	draw: {
@@ -136,7 +130,6 @@ Play.prototype = {
 		}
 	},
 	redrawPointer: function() {
-		var width = 16;
 		this.pointer.clear();
 		
 		if (this.position.x < this.levelConfig.sizeX - 1) {
@@ -160,32 +153,33 @@ Play.prototype = {
 		this.redrawPointer();
 	},
 	createInterface: function() {
-		var headerStyle = {
-			font: '64px VT323',
-			fill: '#ffffff',
-			align: 'center'
-		};
-		var style = {
-			font: '32px VT323',
-			fill: '#ffffff',
-			align: 'right'
-		};
-		
 		this.createBackground();
 		this.createBoard();
 		this.createPointer();
 
-		this.levelLabel = this.game.add.text(this.game.world.centerX, 40, 'Level', headerStyle);
-		this.levelLabel.anchor.setTo(0.5, 0.5);
-		this.levelLabel.setShadow(3, 3, 'rgba(0,0,0,0.5)', 2);
+		this.levelLabel = this.game.add.text(20, 10, this.levelConfig.label + ' level: ' + this.level, { font: '24px VT323', fill: '#ffffff' });
+		this.levelLabel.anchor.setTo(0, 0);
+		//this.levelLabel.setShadow(3, 3, 'rgba(0,0,0,0.5)', 2);
 
-		this.resultLabel = this.game.add.text(10, 40, 'Result', style);
-		this.resultLabel.anchor.setTo(0, 0.5);
+		this.scoreLabel = this.game.add.text(this.game.world.width - 20, 10, 'Total score: ' + _.sum(_.map(this.game.mode, 'points')), { font: '24px VT323', fill: '#ffffff' });
+		this.scoreLabel.anchor.setTo(1, 0);
+		//this.scoreLabel.setShadow(3, 3, 'rgba(0,0,0,0.5)', 2);
+
+		this.resultLabel = this.game.add.text(20, 90, 'Current value', { font: '36px VT323', fill: '#ffffff' });
+		this.resultLabel.anchor.setTo(0, 1);
 		this.resultLabel.setShadow(3, 3, 'rgba(0,0,0,0.5)', 2);
+
+		this.stepsLabel = this.game.add.text(20, 105, 'Steps', { font: '20px VT323', fill: '#ffffff' });
+		this.stepsLabel.anchor.setTo(0, 0.5);
+		this.stepsLabel.setShadow(3, 3, 'rgba(0,0,0,0.5)', 2);
 		
-		this.targetLabel = this.game.add.text(this.game.world.width - 10, 40, 'Target: ', style);
-		this.targetLabel.anchor.setTo(1, 0.5);
+		this.targetLabel = this.game.add.text(this.game.world.width - 20, 90, 'Target value: ' + this.target.value, { font: '36px VT323', fill: '#ffffff' });
+		this.targetLabel.anchor.setTo(1, 1);
 		this.targetLabel.setShadow(3, 3, 'rgba(0,0,0,0.5)', 2);
+		
+		this.bonusStepsLabel = this.game.add.text(this.game.world.width - 20, 105, 'Steps for bonus: ' + this.target.steps + ' or less', { font: '20px VT323', fill: '#ffffff' });
+		this.bonusStepsLabel.anchor.setTo(1, 0.5);
+		this.bonusStepsLabel.setShadow(3, 3, 'rgba(0,0,0,0.5)', 2);
 
 		//this.infoLabel = this.game.add.text(this.game.world.width - 10, this.game.world.height, 'Press R to restart', style);
 		//this.infoLabel.anchor.setTo(1, 1);
@@ -195,13 +189,16 @@ Play.prototype = {
 			x: 0,
 			y: 0
 		};
+		this.steps = 0;
 		this.enabled = true;
 		this.result = this.node[this.position.x][this.position.y].value;
 		
-		this.targetLabel.text = 'Target: ' + this.target.value;
-		this.levelLabel.text = 'Level: ' + this.level;
+		this.stepsLabel.text = 'Steps: 0';
 		
 		this.updateView();
+	},
+	menu: function() {
+		this.game.state.start('menu');
 	},
 	update: function () {
 		/*if (this.game.input.activePointer.withinGame) {
@@ -229,11 +226,11 @@ Play.prototype = {
 				change.y += 1;
 			}
 
-			if (this.position.x + change.x < 0 || this.position.x + change.x > difficulty.sizeX - 1) {
+			if (this.position.x + change.x < 0 || this.position.x + change.x > this.levelConfig.sizeX - 1) {
 				change.x = 0;
 			}
 
-			if (this.position.y + change.y < 0 || this.position.y + change.y > difficulty.sizeY - 1) {
+			if (this.position.y + change.y < 0 || this.position.y + change.y > this.levelConfig.sizeY - 1) {
 				change.y = 0;
 			}
 
@@ -249,8 +246,8 @@ Play.prototype = {
 	},
 	updateView: function () {
 		var x, y, node, distance;
-		for (x = 0; x < difficulty.sizeX; x++) {
-			for (y = 0; y < difficulty.sizeY; y++) {
+		for (x = 0; x < this.levelConfig.sizeX; x++) {
+			for (y = 0; y < this.levelConfig.sizeY; y++) {
 				node = this.node[x][y];
 				distance = this.board.distance(x, y, this.position.x, this.position.y);
 				if (x === this.target.position.x && y === this.target.position.y) {
@@ -273,7 +270,8 @@ Play.prototype = {
 
 		this.pointer.position.setTo(this.offsetX + this.position.x * this.tileSize, this.offsetY + this.position.y * this.tileSize);
 
-		this.resultLabel.text = 'Result: ' + this.result;
+		this.resultLabel.text = 'Current value: ' + this.result;
+		this.stepsLabel.text = 'Steps: ' + this.steps;
 		
 		this.redrawPointer();
 	},
@@ -286,6 +284,7 @@ Play.prototype = {
 		if (this.board.distance(x, y, this.position.x, this.position.y) === 1) {
 			this.position.x = x;
 			this.position.y = y;
+			this.steps++;
 
 			if (change.x !== 0) {
 				this.result += this.node[this.position.x][this.position.y].value;
@@ -295,10 +294,10 @@ Play.prototype = {
 
 			if (this.target.value === this.result) {
 				// win
-				this.game.state.start('finish', true, false, this.level, { value: this.result, position: this.position }, this.target);
+				this.game.state.start('finish', true, false, this.level, { value: this.result, position: this.position, steps: this.steps }, this.target, this.difficulty);
 			} else if (this.target.value < this.result) {
 				// lose
-				this.game.state.start('finish', true, false, this.level, { value: this.result, position: this.position }, this.target);
+				this.game.state.start('finish', true, false, this.level, { value: this.result, position: this.position, steps: this.steps }, this.target, this.difficulty);
 			} else {
 				this.updateView();
 			}

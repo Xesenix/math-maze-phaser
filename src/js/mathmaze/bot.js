@@ -26,23 +26,26 @@ var Bot = function (vertical, horizontal) {
 };
 
 Bot.prototype = {
-	traverse: function (movesCoded, board) {
+	traverse: function (distance, movesCoded, board) {
 		var moves = _.split(movesCoded, ',');
 		var position = {
 			x: 0,
 			y: 0
 		};
 		var result = {
+			steps: 0,
+			realSteps: 0,
 			value: board.getValue(position.x, position.y),
-			position: position
+			position: _.clone(position)
 		};
 
-		_.each(moves, _.bind(function (code) {
+		for (var i = 0; i < distance; i++) {
+			var code = moves[i % moves.length];
 			var move = this.decodedMove[code];
-			result.position.x += move.x;
-			result.position.y += move.y;
-			result.value = move.action(result, board.getValue(result.position.x, result.position.y));
-		}, this));
+			position.x += move.x;
+			position.y += move.y;
+			result.value = move.action(result, board.getValue(position.x, position.y), position.x, position.y);
+		}
 
 		return result;
 	}

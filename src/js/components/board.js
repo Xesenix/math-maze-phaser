@@ -6,17 +6,17 @@ var Board = function (level) {
 };
 
 Board.prototype = {
-	create: function (level) {
+	create: function (config) {
 		var x, y, node;
-		var rand = new RandGenerator(level.seed);
+		var rand = new RandGenerator(config.level);
 		
 		this.node = [];
 
-		for (x = 0; x < level.sizeX; x++) {
+		for (x = 0; x < config.sizeX; x++) {
 			this.node[x] = [];
-			for (y = 0; y < level.sizeY; y++) {
+			for (y = 0; y < config.sizeY; y++) {
 				node = {
-					value: rand.intBetween(1, level.maxNumber)
+					value: rand.intBetween(1, config.maxNumber)
 				};
 				this.node[x][y] = node;
 			}

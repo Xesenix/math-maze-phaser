@@ -9,6 +9,7 @@
     "game"
   ],
   "dependencies": {
+    "js-md5": "^0.4.1",
     "lodash": "^4.15.0",
     "phaser": "^2.6.1",
     "random-seed": "^0.3.0"
