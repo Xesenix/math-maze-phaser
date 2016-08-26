@@ -9,6 +9,6 @@ You can play on 4 difficulty settings that differ in size of numbers you need to
 ![Game screen](https://github.com/Xesenix/math-maze-phaser/blob/master/assets/screen03.png?raw=true "Main menu")
 ![Game screen](https://github.com/Xesenix/math-maze-phaser/blob/master/assets/screen02.png?raw=true "Game screen")
 
-If you finish in less than required amouint of steps and on blue squer you get bonus points.
+If you finish in less than required amount of steps and on blue squer you get bonus points.
 
 ![Game screen](https://github.com/Xesenix/math-maze-phaser/blob/master/assets/screen04.png?raw=true "Perfect end")
