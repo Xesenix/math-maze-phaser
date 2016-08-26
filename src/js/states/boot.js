@@ -1,5 +1,5 @@
-/* global window */
 'use strict';
+/* global window */
 
 function Boot() {
 }
@@ -11,10 +11,16 @@ Boot.prototype = {
 	create: function() {
 		this.game.input.maxPointers = 1;
 		this.game.state.start('preload');
+		this.game.lang = 'en';
+		this.game.theme = {
+			//font: 'Exo'
+			font: 'Ubuntu'
+		};
 		
 		window.WebFontConfig = {
 			google: {
-				families: ['VT323']
+				//families: ['Exo::latin-ext']
+				families: ['Ubuntu::latin-ext']
 			}
 		};
 	}

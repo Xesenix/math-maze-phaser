@@ -1,14 +1,42 @@
 'use strict';
 /* global Phaser, localStorage */
 var _ = require('lodash');
-
-var LabelButton = require('./../components/label_button.js');
+var LabelButton = require('../components/label_button.js');
+var Localize = require('localize');
+var localization = new Localize({
+	'Score: $[1]': {
+        pl: 'Punkty: $[1]'
+    },
+    'Logged in as: ': {
+        pl: 'Zalogowany jako: '
+    },
+    'Easy (numbers 1-3)': {
+        pl: 'Łatwy (cyfry 1-3)'
+    },
+    'Medium (numbers 1-5)': {
+        pl: 'Średni (cyfry 1-5)'
+    },
+	'Hard (numbers 1-7)': {
+		pl: 'Trudny (cyfry 1-7)'
+	},
+	'Insane (numbers 1-9)': {
+		pl: 'Szalony (cyfry 1-9)'
+	},
+	'unlocked level $[1]': {
+		pl: 'odblokowany poziom $[1]'
+	},
+	'Reset progress': {
+		pl: 'Zresetuj postęp'
+	}
+});
 
 function Menu() {}
 
 Menu.prototype = {
 	init: function() {
 		this.menuItemIndex = 0;
+		
+		localization.setLocale(this.game.lang || 'en');
 	},
 	preload: function() {
 
@@ -31,11 +59,11 @@ Menu.prototype = {
 		this.insaneKey.onDown.add(_.bind(function() { this.game.state.start('play', true, false, this.game.mode.insane.unlocked, this.game.mode.insane);}, this));
 	},
 	createMenuButton: function(label, callback) {
-		var button = new LabelButton(this.game, this.world.centerX, 200 + 80 * (this.menuItemIndex++), 'btn', label, callback, this, this);
+		var button = new LabelButton(this.game, this.world.centerX, 210 + 80 * (this.menuItemIndex++), 'btn', label, callback, this, this);
 		button.anchor.setTo(0.5, 0.5);
 		button.width = 360;	
-		button.height = 72;
-		button.label.setStyle({ font: '24px VT323', fill: '#000000', align: 'center' }, true);
+		button.height = 70;
+		button.label.setStyle({ font: '20px ' + this.game.theme.font, fill: '#000000', align: 'center' }, true);
 		
 		this.game.world.add(button);
 		
@@ -64,53 +92,79 @@ Menu.prototype = {
 	},
 	createMenu: function() {
 		this.easyButton = this.createMenuButton(
-			'Easy (numbers 1-3)\nunlocked level ' + this.game.mode.easy.unlocked, 
+			localization.translate('Easy (numbers 1-3)') + '\n' + localization.translate('unlocked level $[1]', this.game.mode.easy.unlocked), 
 			_.bind(function() { this.game.state.start('play', true, false, this.game.mode.easy.unlocked, this.game.mode.easy);}, this)
 		);
 		this.easyButton.tint = 0xffbb60;
 		
 		this.mediumButton = this.createMenuButton(
-			'Medium (numbers 1-5)\nunlocked level ' + this.game.mode.medium.unlocked,
+			localization.translate('Medium (numbers 1-5)') + '\n' + localization.translate('unlocked level $[1]', this.game.mode.medium.unlocked),
 			_.bind(function() {this.game.state.start('play', true, false, this.game.mode.medium.unlocked, this.game.mode.medium);}, this)
 		);
 		this.mediumButton.tint = 0xffbb60;
 		
 		this.hardButton = this.createMenuButton(
-			'Hard (numbers 1-7)\nunlocked level ' + this.game.mode.hard.unlocked,
+			localization.translate('Hard (numbers 1-7)') + '\n' + localization.translate('unlocked level $[1]', this.game.mode.hard.unlocked),
 			_.bind(function() {this.game.state.start('play', true, false, this.game.mode.hard.unlocked, this.game.mode.hard);}, this)
 		);
 		this.hardButton.tint = 0xffbb60;
 		
 		this.insaneButton = this.createMenuButton(
-			'Insane (numbers 1-9)\nunlocked level ' + this.game.mode.insane.unlocked,
+			localization.translate('Insane (numbers 1-9)') + '\n' + localization.translate('unlocked level $[1]', this.game.mode.insane.unlocked),
 			_.bind(function() {this.game.state.start('play', true, false, this.game.mode.insane.unlocked, this.game.mode.insane);}, this)
 		);
 		this.insaneButton.tint = 0xffbb60;
 		
-		this.resetButton = this.createMenuButton('Reset progress ', _.bind(this.resetProgress, this));
+		this.resetButton = this.createMenuButton(localization.translate('Reset progress'), _.bind(this.resetProgress, this));
 		this.resetButton.tint = 0xff4040;
+		this.resetButton.y += 20;
 		
-		this.game.add.tween(this.easyButton).from({ x: -320}, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
-		this.game.add.tween(this.mediumButton).from({ x: -320}, 500, Phaser.Easing.Linear.NONE, true, 100, 0, false);
-		this.game.add.tween(this.hardButton).from({ x: -320}, 500, Phaser.Easing.Linear.NONE, true, 200, 0, false);
-		this.game.add.tween(this.insaneButton).from({ x: -320}, 500, Phaser.Easing.Linear.NONE, true, 300, 0, false);
-		this.game.add.tween(this.resetButton).from({ y: this.game.world.height + 40 }, 500, Phaser.Easing.Linear.NONE, true, 800, 0, false);
+		this.game.add.tween(this.easyButton)
+			.from({ x: -320}, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+		this.game.add.tween(this.mediumButton)
+			.from({ x: -320}, 500, Phaser.Easing.Linear.NONE, true, 100, 0, false);
+		this.game.add.tween(this.hardButton)
+			.from({ x: -320}, 500, Phaser.Easing.Linear.NONE, true, 200, 0, false);
+		this.game.add.tween(this.insaneButton)
+			.from({ x: -320}, 500, Phaser.Easing.Linear.NONE, true, 300, 0, false);
+		this.game.add.tween(this.resetButton)
+			.from({ y: this.game.world.height + 40 }, 500, Phaser.Easing.Linear.NONE, true, 800, 0, false);
 	},
 	createInterface: function() {
 		this.createBackground();
 		this.createMenu();
 		
-		this.titleLabel = this.game.add.text(this.game.world.centerX, 40, 'Math Maze', { font: '64px VT323', fill: '#ffffff', align: 'center'});
+		this.titleLabel = this.game.add.text(
+			this.game.world.centerX, 
+			40,
+			'Math Maze',
+			{ font: '64px ' + this.game.theme.font, fill: '#ffffff', align: 'center'}
+		);
 		this.titleLabel.anchor.setTo(0.5, 0.5);
 
-		this.scoreLabel = this.game.add.text(this.game.world.centerX, 100, 'Score: ' + _.sum(_.map(this.game.mode, 'points')), { font: '48px VT323', fill: '#ffffff', align: 'center'});
+		this.scoreLabel = this.game.add.text(
+			this.game.world.centerX, 
+			100, 
+			localization.translate('Score: $[1]', _.sum(_.map(this.game.mode, 'points'))),
+			{ font: '40px ' + this.game.theme.font, fill: '#ffffff', align: 'center'}
+		);
 		this.scoreLabel.anchor.setTo(0.5, 0.5);
+
+		if (typeof(this.game.service.user) !== 'undefined' && this.game.service.user !== null) {
+			this.loginLabel = this.game.add.text(
+				this.game.world.centerX, 
+				150, 
+				localization.translate('Logged in as: ') + this.game.service.user.username,
+				{ font: '24px ' + this.game.theme.font, fill: '#ffffff', align: 'center'}
+			);
+			this.loginLabel.anchor.setTo(0.5, 0.5);
+			this.game.add.tween(this.loginLabel).from({ alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 1500, 0, false);
+		}
 		
 		this.game.add.tween(this.titleLabel).from({ alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 800, 0, false);
 		this.game.add.tween(this.scoreLabel).from({ alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 1200, 0, false);
 	},
 	resetProgress: function() {
-		console.log('resetProgress');
 		this.game.mode.easy.unlocked = 1;
 		this.game.mode.easy.points = 0;
 		this.game.mode.medium.unlocked = 1;
@@ -120,18 +174,27 @@ Menu.prototype = {
 		this.game.mode.insane.unlocked = 1;
 		this.game.mode.insane.points = 0;
 		
-		this.easyButton.label.text = 'Easy (numbers 1-3)\nunlocked level ' + this.game.mode.easy.unlocked;
-		this.mediumButton.label.text = 'Medium (numbers 1-5)\nunlocked level ' + this.game.mode.medium.unlocked;
-		this.hardButton.label.text = 'Hard (numbers 1-7)\nunlocked level ' + this.game.mode.hard.unlocked;
-		this.insaneButton.label.text = 'Insane (numbers 1-9)\nunlocked level ' + this.game.mode.insane.unlocked;
+		this.easyButton.label.text = localization.translate('Easy (numbers 1-3)') +
+			'\n' + localization.translate('unlocked level $[1]', this.game.mode.easy.unlocked);
+		this.mediumButton.label.text = localization.translate('Medium (numbers 1-5)') +
+			'\n' + localization.translate('unlocked level $[1]', this.game.mode.medium.unlocked);
+		this.hardButton.label.text = localization.translate('Hard (numbers 1-7)') +
+			'\n' + localization.translate('unlocked level $[1]', this.game.mode.hard.unlocked);
+		this.insaneButton.label.text = localization.translate('Insane (numbers 1-9)') +
+			'\n' + localization.translate('unlocked level $[1]', this.game.mode.insane.unlocked);
 		
-		this.scoreLabel.text = 'Score: ' + _.sum(_.map(this.game.mode, 'points'));
+		this.scoreLabel.text = localization.translate('Score: $[1]', _.sum(_.map(this.game.mode, 'points')));
 		
-		this.game.add.tween(this.scoreLabel).from({ x: this.scoreLabel.x - 10}, 100, Phaser.Easing.Linear.InOut, true, 0, 1, true);
-		this.game.add.tween(this.easyButton).to({ x: this.easyButton.x - 10}, 100, Phaser.Easing.Linear.InOut, true, 50, 1, true);
-		this.game.add.tween(this.mediumButton).to({ x: this.mediumButton.x - 10}, 100, Phaser.Easing.Linear.InOut, true, 100, 1, true);
-		this.game.add.tween(this.hardButton).to({ x: this.hardButton.x - 10}, 100, Phaser.Easing.Linear.InOut, true, 150, 1, true);
-		this.game.add.tween(this.insaneButton).to({ x: this.insaneButton.x - 10}, 100, Phaser.Easing.Linear.InOut, true, 200, 1, true);
+		this.game.add.tween(this.scoreLabel)
+			.from({ x: this.scoreLabel.x - 10}, 100, Phaser.Easing.Linear.InOut, true, 0, 1, true);
+		this.game.add.tween(this.easyButton)
+			.to({ x: this.easyButton.x - 10}, 100, Phaser.Easing.Linear.InOut, true, 50, 1, true);
+		this.game.add.tween(this.mediumButton)
+			.to({ x: this.mediumButton.x - 10}, 100, Phaser.Easing.Linear.InOut, true, 100, 1, true);
+		this.game.add.tween(this.hardButton)
+			.to({ x: this.hardButton.x - 10}, 100, Phaser.Easing.Linear.InOut, true, 150, 1, true);
+		this.game.add.tween(this.insaneButton)
+			.to({ x: this.insaneButton.x - 10}, 100, Phaser.Easing.Linear.InOut, true, 200, 1, true);
 		
 		localStorage.setItem('gameSave', JSON.stringify({}));
 	},

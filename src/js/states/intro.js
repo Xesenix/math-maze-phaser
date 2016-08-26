@@ -118,17 +118,16 @@ Intro.prototype = {
 
 	},
 	create: function() {
-		var style = { font: '64px VT323', fill: '#ffffff', align: 'center'};
 		this.sprite = this.game.add.sprite(this.game.world.centerX, 180, 'math-maze-logo');
 		this.sprite.anchor.setTo(0.5, 0.5);
 
-		this.titleText = this.game.add.text(this.game.world.centerX, 360, 'Math Maze', style);
+		this.titleText = this.game.add.text(this.game.world.centerX, 360, 'Math Maze', { font: '64px ' + this.game.theme.font, fill: '#ffffff', align: 'center'});
 		this.titleText.anchor.setTo(0.5, 0.5);
 
-		this.authorText = this.game.add.text(this.game.world.centerX, 420, 'Game by Xesenix', { font: '36px VT323', fill: '#ffffff', align: 'center'});
+		this.authorText = this.game.add.text(this.game.world.centerX, 420, 'Game by Xesenix', { font: '36px ' + this.game.theme.font, fill: '#ffffff', align: 'center'});
 		this.authorText.anchor.setTo(0.5, 0.5);
 
-		this.instructionsText = this.game.add.text(this.game.world.centerX, 460, 'Click anywhere to play "Math Maze"', { font: '24px VT323', fill: '#dddddd', align: 'center'});
+		this.instructionsText = this.game.add.text(this.game.world.centerX, 460, 'Click anywhere to play "Math Maze"', { font: '24px ' + this.game.theme.font, fill: '#dddddd', align: 'center'});
 		this.instructionsText.anchor.setTo(0.5, 0.5);
 
 		this.game.add.tween(this.sprite).from({ y: -120 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
@@ -138,7 +137,7 @@ Intro.prototype = {
 	},
 	update: function() {
 		if (this.game.input.activePointer.justPressed()) {
-			this.game.state.start('menu');
+			this.game.state.start('service');
 		}
 	}
 };

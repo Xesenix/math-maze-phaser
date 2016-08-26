@@ -1,4 +1,296 @@
 (function e(t,n,r){function s(o,u){if(!n[o]){if(!t[o]){var a=typeof require=="function"&&require;if(!u&&a)return a(o,!0);if(i)return i(o,!0);var f=new Error("Cannot find module '"+o+"'");throw f.code="MODULE_NOT_FOUND",f}var l=n[o]={exports:{}};t[o][0].call(l.exports,function(e){var n=t[o][1][e];return s(n?n:e)},l,l.exports,e,t,n,r)}return n[o].exports}var i=typeof require=="function"&&require;for(var o=0;o<r.length;o++)s(r[o]);return s})({1:[function(require,module,exports){
+"use strict";
+
+// rawAsap provides everything we need except exception management.
+var rawAsap = require("./raw");
+// RawTasks are recycled to reduce GC churn.
+var freeTasks = [];
+// We queue errors to ensure they are thrown in right order (FIFO).
+// Array-as-queue is good enough here, since we are just dealing with exceptions.
+var pendingErrors = [];
+var requestErrorThrow = rawAsap.makeRequestCallFromTimer(throwFirstError);
+
+function throwFirstError() {
+    if (pendingErrors.length) {
+        throw pendingErrors.shift();
+    }
+}
+
+/**
+ * Calls a task as soon as possible after returning, in its own event, with priority
+ * over other events like animation, reflow, and repaint. An error thrown from an
+ * event will not interrupt, nor even substantially slow down the processing of
+ * other events, but will be rather postponed to a lower priority event.
+ * @param {{call}} task A callable object, typically a function that takes no
+ * arguments.
+ */
+module.exports = asap;
+function asap(task) {
+    var rawTask;
+    if (freeTasks.length) {
+        rawTask = freeTasks.pop();
+    } else {
+        rawTask = new RawTask();
+    }
+    rawTask.task = task;
+    rawAsap(rawTask);
+}
+
+// We wrap tasks with recyclable task objects.  A task object implements
+// `call`, just like a function.
+function RawTask() {
+    this.task = null;
+}
+
+// The sole purpose of wrapping the task is to catch the exception and recycle
+// the task object after its single use.
+RawTask.prototype.call = function () {
+    try {
+        this.task.call();
+    } catch (error) {
+        if (asap.onerror) {
+            // This hook exists purely for testing purposes.
+            // Its name will be periodically randomized to break any code that
+            // depends on its existence.
+            asap.onerror(error);
+        } else {
+            // In a web browser, exceptions are not fatal. However, to avoid
+            // slowing down the queue of pending tasks, we rethrow the error in a
+            // lower priority turn.
+            pendingErrors.push(error);
+            requestErrorThrow();
+        }
+    } finally {
+        this.task = null;
+        freeTasks[freeTasks.length] = this;
+    }
+};
+
+},{"./raw":2}],2:[function(require,module,exports){
+(function (global){
+"use strict";
+
+// Use the fastest means possible to execute a task in its own turn, with
+// priority over other events including IO, animation, reflow, and redraw
+// events in browsers.
+//
+// An exception thrown by a task will permanently interrupt the processing of
+// subsequent tasks. The higher level `asap` function ensures that if an
+// exception is thrown by a task, that the task queue will continue flushing as
+// soon as possible, but if you use `rawAsap` directly, you are responsible to
+// either ensure that no exceptions are thrown from your task, or to manually
+// call `rawAsap.requestFlush` if an exception is thrown.
+module.exports = rawAsap;
+function rawAsap(task) {
+    if (!queue.length) {
+        requestFlush();
+        flushing = true;
+    }
+    // Equivalent to push, but avoids a function call.
+    queue[queue.length] = task;
+}
+
+var queue = [];
+// Once a flush has been requested, no further calls to `requestFlush` are
+// necessary until the next `flush` completes.
+var flushing = false;
+// `requestFlush` is an implementation-specific method that attempts to kick
+// off a `flush` event as quickly as possible. `flush` will attempt to exhaust
+// the event queue before yielding to the browser's own event loop.
+var requestFlush;
+// The position of the next task to execute in the task queue. This is
+// preserved between calls to `flush` so that it can be resumed if
+// a task throws an exception.
+var index = 0;
+// If a task schedules additional tasks recursively, the task queue can grow
+// unbounded. To prevent memory exhaustion, the task queue will periodically
+// truncate already-completed tasks.
+var capacity = 1024;
+
+// The flush function processes all tasks that have been scheduled with
+// `rawAsap` unless and until one of those tasks throws an exception.
+// If a task throws an exception, `flush` ensures that its state will remain
+// consistent and will resume where it left off when called again.
+// However, `flush` does not make any arrangements to be called again if an
+// exception is thrown.
+function flush() {
+    while (index < queue.length) {
+        var currentIndex = index;
+        // Advance the index before calling the task. This ensures that we will
+        // begin flushing on the next task the task throws an error.
+        index = index + 1;
+        queue[currentIndex].call();
+        // Prevent leaking memory for long chains of recursive calls to `asap`.
+        // If we call `asap` within tasks scheduled by `asap`, the queue will
+        // grow, but to avoid an O(n) walk for every task we execute, we don't
+        // shift tasks off the queue after they have been executed.
+        // Instead, we periodically shift 1024 tasks off the queue.
+        if (index > capacity) {
+            // Manually shift all values starting at the index back to the
+            // beginning of the queue.
+            for (var scan = 0, newLength = queue.length - index; scan < newLength; scan++) {
+                queue[scan] = queue[scan + index];
+            }
+            queue.length -= index;
+            index = 0;
+        }
+    }
+    queue.length = 0;
+    index = 0;
+    flushing = false;
+}
+
+// `requestFlush` is implemented using a strategy based on data collected from
+// every available SauceLabs Selenium web driver worker at time of writing.
+// https://docs.google.com/spreadsheets/d/1mG-5UYGup5qxGdEMWkhP6BWCz053NUb2E1QoUTU16uA/edit#gid=783724593
+
+// Safari 6 and 6.1 for desktop, iPad, and iPhone are the only browsers that
+// have WebKitMutationObserver but not un-prefixed MutationObserver.
+// Must use `global` instead of `window` to work in both frames and web
+// workers. `global` is a provision of Browserify, Mr, Mrs, or Mop.
+var BrowserMutationObserver = global.MutationObserver || global.WebKitMutationObserver;
+
+// MutationObservers are desirable because they have high priority and work
+// reliably everywhere they are implemented.
+// They are implemented in all modern browsers.
+//
+// - Android 4-4.3
+// - Chrome 26-34
+// - Firefox 14-29
+// - Internet Explorer 11
+// - iPad Safari 6-7.1
+// - iPhone Safari 7-7.1
+// - Safari 6-7
+if (typeof BrowserMutationObserver === "function") {
+    requestFlush = makeRequestCallFromMutationObserver(flush);
+
+// MessageChannels are desirable because they give direct access to the HTML
+// task queue, are implemented in Internet Explorer 10, Safari 5.0-1, and Opera
+// 11-12, and in web workers in many engines.
+// Although message channels yield to any queued rendering and IO tasks, they
+// would be better than imposing the 4ms delay of timers.
+// However, they do not work reliably in Internet Explorer or Safari.
+
+// Internet Explorer 10 is the only browser that has setImmediate but does
+// not have MutationObservers.
+// Although setImmediate yields to the browser's renderer, it would be
+// preferrable to falling back to setTimeout since it does not have
+// the minimum 4ms penalty.
+// Unfortunately there appears to be a bug in Internet Explorer 10 Mobile (and
+// Desktop to a lesser extent) that renders both setImmediate and
+// MessageChannel useless for the purposes of ASAP.
+// https://github.com/kriskowal/q/issues/396
+
+// Timers are implemented universally.
+// We fall back to timers in workers in most engines, and in foreground
+// contexts in the following browsers.
+// However, note that even this simple case requires nuances to operate in a
+// broad spectrum of browsers.
+//
+// - Firefox 3-13
+// - Internet Explorer 6-9
+// - iPad Safari 4.3
+// - Lynx 2.8.7
+} else {
+    requestFlush = makeRequestCallFromTimer(flush);
+}
+
+// `requestFlush` requests that the high priority event queue be flushed as
+// soon as possible.
+// This is useful to prevent an error thrown in a task from stalling the event
+// queue if the exception handled by Node.js’s
+// `process.on("uncaughtException")` or by a domain.
+rawAsap.requestFlush = requestFlush;
+
+// To request a high priority event, we induce a mutation observer by toggling
+// the text of a text node between "1" and "-1".
+function makeRequestCallFromMutationObserver(callback) {
+    var toggle = 1;
+    var observer = new BrowserMutationObserver(callback);
+    var node = document.createTextNode("");
+    observer.observe(node, {characterData: true});
+    return function requestCall() {
+        toggle = -toggle;
+        node.data = toggle;
+    };
+}
+
+// The message channel technique was discovered by Malte Ubl and was the
+// original foundation for this library.
+// http://www.nonblocking.io/2011/06/windownexttick.html
+
+// Safari 6.0.5 (at least) intermittently fails to create message ports on a
+// page's first load. Thankfully, this version of Safari supports
+// MutationObservers, so we don't need to fall back in that case.
+
+// function makeRequestCallFromMessageChannel(callback) {
+//     var channel = new MessageChannel();
+//     channel.port1.onmessage = callback;
+//     return function requestCall() {
+//         channel.port2.postMessage(0);
+//     };
+// }
+
+// For reasons explained above, we are also unable to use `setImmediate`
+// under any circumstances.
+// Even if we were, there is another bug in Internet Explorer 10.
+// It is not sufficient to assign `setImmediate` to `requestFlush` because
+// `setImmediate` must be called *by name* and therefore must be wrapped in a
+// closure.
+// Never forget.
+
+// function makeRequestCallFromSetImmediate(callback) {
+//     return function requestCall() {
+//         setImmediate(callback);
+//     };
+// }
+
+// Safari 6.0 has a problem where timers will get lost while the user is
+// scrolling. This problem does not impact ASAP because Safari 6.0 supports
+// mutation observers, so that implementation is used instead.
+// However, if we ever elect to use timers in Safari, the prevalent work-around
+// is to add a scroll event listener that calls for a flush.
+
+// `setTimeout` does not call the passed callback if the delay is less than
+// approximately 7 in web workers in Firefox 8 through 18, and sometimes not
+// even then.
+
+function makeRequestCallFromTimer(callback) {
+    return function requestCall() {
+        // We dispatch a timeout with a specified delay of 0 for engines that
+        // can reliably accommodate that request. This will usually be snapped
+        // to a 4 milisecond delay, but once we're flushing, there's no delay
+        // between events.
+        var timeoutHandle = setTimeout(handleTimer, 0);
+        // However, since this timer gets frequently dropped in Firefox
+        // workers, we enlist an interval handle that will try to fire
+        // an event 20 times per second until it succeeds.
+        var intervalHandle = setInterval(handleTimer, 50);
+
+        function handleTimer() {
+            // Whichever timer succeeds will cancel both timers and
+            // execute the callback.
+            clearTimeout(timeoutHandle);
+            clearInterval(intervalHandle);
+            callback();
+        }
+    };
+}
+
+// This is for `asap.js` only.
+// Its name will be periodically randomized to break any code that depends on
+// its existence.
+rawAsap.makeRequestCallFromTimer = makeRequestCallFromTimer;
+
+// ASAP was originally a nextTick shim included in Q. This was factored out
+// into this ASAP package. It was later adapted to RSVP which made further
+// amendments. These decisions, particularly to marginalize MessageChannel and
+// to capture the MutationObserver implementation in a closure, were integrated
+// back into ASAP proper.
+// https://github.com/tildeio/rsvp.js/blob/cddf7232546a9cf858524b75cde6f9edf72620a7/lib/rsvp/asap.js
+
+}).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
+},{}],3:[function(require,module,exports){
 var asn1 = exports;
 
 asn1.bignum = require('bn.js');
@@ -9,7 +301,7 @@ asn1.constants = require('./asn1/constants');
 asn1.decoders = require('./asn1/decoders');
 asn1.encoders = require('./asn1/encoders');
 
-},{"./asn1/api":2,"./asn1/base":4,"./asn1/constants":8,"./asn1/decoders":10,"./asn1/encoders":13,"bn.js":16}],2:[function(require,module,exports){
+},{"./asn1/api":4,"./asn1/base":6,"./asn1/constants":10,"./asn1/decoders":12,"./asn1/encoders":15,"bn.js":18}],4:[function(require,module,exports){
 var asn1 = require('../asn1');
 var inherits = require('inherits');
 
@@ -72,7 +364,7 @@ Entity.prototype.encode = function encode(data, enc, /* internal */ reporter) {
   return this._getEncoder(enc).encode(data, reporter);
 };
 
-},{"../asn1":1,"inherits":91,"vm":136}],3:[function(require,module,exports){
+},{"../asn1":3,"inherits":94,"vm":155}],5:[function(require,module,exports){
 var inherits = require('inherits');
 var Reporter = require('../base').Reporter;
 var Buffer = require('buffer').Buffer;
@@ -190,7 +482,7 @@ EncoderBuffer.prototype.join = function join(out, offset) {
   return out;
 };
 
-},{"../base":4,"buffer":45,"inherits":91}],4:[function(require,module,exports){
+},{"../base":6,"buffer":48,"inherits":94}],6:[function(require,module,exports){
 var base = exports;
 
 base.Reporter = require('./reporter').Reporter;
@@ -198,7 +490,7 @@ base.DecoderBuffer = require('./buffer').DecoderBuffer;
 base.EncoderBuffer = require('./buffer').EncoderBuffer;
 base.Node = require('./node');
 
-},{"./buffer":3,"./node":5,"./reporter":6}],5:[function(require,module,exports){
+},{"./buffer":5,"./node":7,"./reporter":8}],7:[function(require,module,exports){
 var Reporter = require('../base').Reporter;
 var EncoderBuffer = require('../base').EncoderBuffer;
 var DecoderBuffer = require('../base').DecoderBuffer;
@@ -829,7 +1121,7 @@ Node.prototype._isPrintstr = function isPrintstr(str) {
   return /^[A-Za-z0-9 '\(\)\+,\-\.\/:=\?]*$/.test(str);
 };
 
-},{"../base":4,"minimalistic-assert":98}],6:[function(require,module,exports){
+},{"../base":6,"minimalistic-assert":102}],8:[function(require,module,exports){
 var inherits = require('inherits');
 
 function Reporter(options) {
@@ -952,7 +1244,7 @@ ReporterError.prototype.rethrow = function rethrow(msg) {
   return this;
 };
 
-},{"inherits":91}],7:[function(require,module,exports){
+},{"inherits":94}],9:[function(require,module,exports){
 var constants = require('../constants');
 
 exports.tagClass = {
@@ -996,7 +1288,7 @@ exports.tag = {
 };
 exports.tagByName = constants._reverse(exports.tag);
 
-},{"../constants":8}],8:[function(require,module,exports){
+},{"../constants":10}],10:[function(require,module,exports){
 var constants = exports;
 
 // Helper
@@ -1017,7 +1309,7 @@ constants._reverse = function reverse(map) {
 
 constants.der = require('./der');
 
-},{"./der":7}],9:[function(require,module,exports){
+},{"./der":9}],11:[function(require,module,exports){
 var inherits = require('inherits');
 
 var asn1 = require('../../asn1');
@@ -1341,13 +1633,13 @@ function derDecodeLen(buf, primitive, fail) {
   return len;
 }
 
-},{"../../asn1":1,"inherits":91}],10:[function(require,module,exports){
+},{"../../asn1":3,"inherits":94}],12:[function(require,module,exports){
 var decoders = exports;
 
 decoders.der = require('./der');
 decoders.pem = require('./pem');
 
-},{"./der":9,"./pem":11}],11:[function(require,module,exports){
+},{"./der":11,"./pem":13}],13:[function(require,module,exports){
 var inherits = require('inherits');
 var Buffer = require('buffer').Buffer;
 
@@ -1398,7 +1690,7 @@ PEMDecoder.prototype.decode = function decode(data, options) {
   return DERDecoder.prototype.decode.call(this, input, options);
 };
 
-},{"./der":9,"buffer":45,"inherits":91}],12:[function(require,module,exports){
+},{"./der":11,"buffer":48,"inherits":94}],14:[function(require,module,exports){
 var inherits = require('inherits');
 var Buffer = require('buffer').Buffer;
 
@@ -1693,13 +1985,13 @@ function encodeTag(tag, primitive, cls, reporter) {
   return res;
 }
 
-},{"../../asn1":1,"buffer":45,"inherits":91}],13:[function(require,module,exports){
+},{"../../asn1":3,"buffer":48,"inherits":94}],15:[function(require,module,exports){
 var encoders = exports;
 
 encoders.der = require('./der');
 encoders.pem = require('./pem');
 
-},{"./der":12,"./pem":14}],14:[function(require,module,exports){
+},{"./der":14,"./pem":16}],16:[function(require,module,exports){
 var inherits = require('inherits');
 
 var DEREncoder = require('./der');
@@ -1722,7 +2014,7 @@ PEMEncoder.prototype.encode = function encode(data, options) {
   return out.join('\n');
 };
 
-},{"./der":12,"inherits":91}],15:[function(require,module,exports){
+},{"./der":14,"inherits":94}],17:[function(require,module,exports){
 'use strict'
 
 exports.toByteArray = toByteArray
@@ -1833,7 +2125,7 @@ function fromByteArray (uint8) {
   return parts.join('')
 }
 
-},{}],16:[function(require,module,exports){
+},{}],18:[function(require,module,exports){
 (function (module, exports) {
   'use strict';
 
@@ -5262,7 +5554,7 @@ function fromByteArray (uint8) {
   };
 })(typeof module === 'undefined' || module, this);
 
-},{}],17:[function(require,module,exports){
+},{}],19:[function(require,module,exports){
 var r;
 
 module.exports = function rand(len) {
@@ -5321,9 +5613,9 @@ if (typeof window === 'object') {
   }
 }
 
-},{}],18:[function(require,module,exports){
+},{}],20:[function(require,module,exports){
 
-},{}],19:[function(require,module,exports){
+},{}],21:[function(require,module,exports){
 (function (Buffer){
 // based on the aes implimentation in triple sec
 // https://github.com/keybase/triplesec
@@ -5504,7 +5796,7 @@ AES.prototype._doCryptBlock = function (M, keySchedule, SUB_MIX, SBOX) {
 exports.AES = AES
 
 }).call(this,require("buffer").Buffer)
-},{"buffer":45}],20:[function(require,module,exports){
+},{"buffer":48}],22:[function(require,module,exports){
 (function (Buffer){
 var aes = require('./aes')
 var Transform = require('cipher-base')
@@ -5605,7 +5897,7 @@ function xorTest (a, b) {
 }
 
 }).call(this,require("buffer").Buffer)
-},{"./aes":19,"./ghash":24,"buffer":45,"buffer-xor":44,"cipher-base":46,"inherits":91}],21:[function(require,module,exports){
+},{"./aes":21,"./ghash":26,"buffer":48,"buffer-xor":47,"cipher-base":49,"inherits":94}],23:[function(require,module,exports){
 var ciphers = require('./encrypter')
 exports.createCipher = exports.Cipher = ciphers.createCipher
 exports.createCipheriv = exports.Cipheriv = ciphers.createCipheriv
@@ -5618,7 +5910,7 @@ function getCiphers () {
 }
 exports.listCiphers = exports.getCiphers = getCiphers
 
-},{"./decrypter":22,"./encrypter":23,"./modes":25}],22:[function(require,module,exports){
+},{"./decrypter":24,"./encrypter":25,"./modes":27}],24:[function(require,module,exports){
 (function (Buffer){
 var aes = require('./aes')
 var Transform = require('cipher-base')
@@ -5759,7 +6051,7 @@ exports.createDecipher = createDecipher
 exports.createDecipheriv = createDecipheriv
 
 }).call(this,require("buffer").Buffer)
-},{"./aes":19,"./authCipher":20,"./modes":25,"./modes/cbc":26,"./modes/cfb":27,"./modes/cfb1":28,"./modes/cfb8":29,"./modes/ctr":30,"./modes/ecb":31,"./modes/ofb":32,"./streamCipher":33,"buffer":45,"cipher-base":46,"evp_bytestokey":82,"inherits":91}],23:[function(require,module,exports){
+},{"./aes":21,"./authCipher":22,"./modes":27,"./modes/cbc":28,"./modes/cfb":29,"./modes/cfb1":30,"./modes/cfb8":31,"./modes/ctr":32,"./modes/ecb":33,"./modes/ofb":34,"./streamCipher":35,"buffer":48,"cipher-base":49,"evp_bytestokey":85,"inherits":94}],25:[function(require,module,exports){
 (function (Buffer){
 var aes = require('./aes')
 var Transform = require('cipher-base')
@@ -5885,7 +6177,7 @@ exports.createCipheriv = createCipheriv
 exports.createCipher = createCipher
 
 }).call(this,require("buffer").Buffer)
-},{"./aes":19,"./authCipher":20,"./modes":25,"./modes/cbc":26,"./modes/cfb":27,"./modes/cfb1":28,"./modes/cfb8":29,"./modes/ctr":30,"./modes/ecb":31,"./modes/ofb":32,"./streamCipher":33,"buffer":45,"cipher-base":46,"evp_bytestokey":82,"inherits":91}],24:[function(require,module,exports){
+},{"./aes":21,"./authCipher":22,"./modes":27,"./modes/cbc":28,"./modes/cfb":29,"./modes/cfb1":30,"./modes/cfb8":31,"./modes/ctr":32,"./modes/ecb":33,"./modes/ofb":34,"./streamCipher":35,"buffer":48,"cipher-base":49,"evp_bytestokey":85,"inherits":94}],26:[function(require,module,exports){
 (function (Buffer){
 var zeros = new Buffer(16)
 zeros.fill(0)
@@ -5987,7 +6279,7 @@ function xor (a, b) {
 }
 
 }).call(this,require("buffer").Buffer)
-},{"buffer":45}],25:[function(require,module,exports){
+},{"buffer":48}],27:[function(require,module,exports){
 exports['aes-128-ecb'] = {
   cipher: 'AES',
   key: 128,
@@ -6160,7 +6452,7 @@ exports['aes-256-gcm'] = {
   type: 'auth'
 }
 
-},{}],26:[function(require,module,exports){
+},{}],28:[function(require,module,exports){
 var xor = require('buffer-xor')
 
 exports.encrypt = function (self, block) {
@@ -6179,7 +6471,7 @@ exports.decrypt = function (self, block) {
   return xor(out, pad)
 }
 
-},{"buffer-xor":44}],27:[function(require,module,exports){
+},{"buffer-xor":47}],29:[function(require,module,exports){
 (function (Buffer){
 var xor = require('buffer-xor')
 
@@ -6214,7 +6506,7 @@ function encryptStart (self, data, decrypt) {
 }
 
 }).call(this,require("buffer").Buffer)
-},{"buffer":45,"buffer-xor":44}],28:[function(require,module,exports){
+},{"buffer":48,"buffer-xor":47}],30:[function(require,module,exports){
 (function (Buffer){
 function encryptByte (self, byteParam, decrypt) {
   var pad
@@ -6252,7 +6544,7 @@ function shiftIn (buffer, value) {
 }
 
 }).call(this,require("buffer").Buffer)
-},{"buffer":45}],29:[function(require,module,exports){
+},{"buffer":48}],31:[function(require,module,exports){
 (function (Buffer){
 function encryptByte (self, byteParam, decrypt) {
   var pad = self._cipher.encryptBlock(self._prev)
@@ -6271,7 +6563,7 @@ exports.encrypt = function (self, chunk, decrypt) {
 }
 
 }).call(this,require("buffer").Buffer)
-},{"buffer":45}],30:[function(require,module,exports){
+},{"buffer":48}],32:[function(require,module,exports){
 (function (Buffer){
 var xor = require('buffer-xor')
 
@@ -6306,7 +6598,7 @@ exports.encrypt = function (self, chunk) {
 }
 
 }).call(this,require("buffer").Buffer)
-},{"buffer":45,"buffer-xor":44}],31:[function(require,module,exports){
+},{"buffer":48,"buffer-xor":47}],33:[function(require,module,exports){
 exports.encrypt = function (self, block) {
   return self._cipher.encryptBlock(block)
 }
@@ -6314,7 +6606,7 @@ exports.decrypt = function (self, block) {
   return self._cipher.decryptBlock(block)
 }
 
-},{}],32:[function(require,module,exports){
+},{}],34:[function(require,module,exports){
 (function (Buffer){
 var xor = require('buffer-xor')
 
@@ -6334,7 +6626,7 @@ exports.encrypt = function (self, chunk) {
 }
 
 }).call(this,require("buffer").Buffer)
-},{"buffer":45,"buffer-xor":44}],33:[function(require,module,exports){
+},{"buffer":48,"buffer-xor":47}],35:[function(require,module,exports){
 (function (Buffer){
 var aes = require('./aes')
 var Transform = require('cipher-base')
@@ -6363,7 +6655,7 @@ StreamCipher.prototype._final = function () {
 }
 
 }).call(this,require("buffer").Buffer)
-},{"./aes":19,"buffer":45,"cipher-base":46,"inherits":91}],34:[function(require,module,exports){
+},{"./aes":21,"buffer":48,"cipher-base":49,"inherits":94}],36:[function(require,module,exports){
 var ebtk = require('evp_bytestokey')
 var aes = require('browserify-aes/browser')
 var DES = require('browserify-des')
@@ -6438,7 +6730,7 @@ function getCiphers () {
 }
 exports.listCiphers = exports.getCiphers = getCiphers
 
-},{"browserify-aes/browser":21,"browserify-aes/modes":25,"browserify-des":35,"browserify-des/modes":36,"evp_bytestokey":82}],35:[function(require,module,exports){
+},{"browserify-aes/browser":23,"browserify-aes/modes":27,"browserify-des":37,"browserify-des/modes":38,"evp_bytestokey":85}],37:[function(require,module,exports){
 (function (Buffer){
 var CipherBase = require('cipher-base')
 var des = require('des.js')
@@ -6485,7 +6777,7 @@ DES.prototype._final = function () {
 }
 
 }).call(this,require("buffer").Buffer)
-},{"buffer":45,"cipher-base":46,"des.js":54,"inherits":91}],36:[function(require,module,exports){
+},{"buffer":48,"cipher-base":49,"des.js":57,"inherits":94}],38:[function(require,module,exports){
 exports['des-ecb'] = {
   key: 8,
   iv: 0
@@ -6511,7 +6803,7 @@ exports['des-ede'] = {
   iv: 0
 }
 
-},{}],37:[function(require,module,exports){
+},{}],39:[function(require,module,exports){
 (function (Buffer){
 var bn = require('bn.js');
 var randomBytes = require('randombytes');
@@ -6555,7 +6847,7 @@ function getr(priv) {
 }
 
 }).call(this,require("buffer").Buffer)
-},{"bn.js":16,"buffer":45,"randombytes":113}],38:[function(require,module,exports){
+},{"bn.js":18,"buffer":48,"randombytes":130}],40:[function(require,module,exports){
 (function (Buffer){
 'use strict'
 exports['RSA-SHA224'] = exports.sha224WithRSAEncryption = {
@@ -6631,7 +6923,7 @@ exports['RSA-MD5'] = exports.md5WithRSAEncryption = {
 }
 
 }).call(this,require("buffer").Buffer)
-},{"buffer":45}],39:[function(require,module,exports){
+},{"buffer":48}],41:[function(require,module,exports){
 (function (Buffer){
 var _algos = require('./algos')
 var createHash = require('create-hash')
@@ -6738,7 +7030,7 @@ module.exports = {
 }
 
 }).call(this,require("buffer").Buffer)
-},{"./algos":38,"./sign":41,"./verify":42,"buffer":45,"create-hash":49,"inherits":91,"stream":133}],40:[function(require,module,exports){
+},{"./algos":40,"./sign":43,"./verify":44,"buffer":48,"create-hash":52,"inherits":94,"stream":150}],42:[function(require,module,exports){
 'use strict'
 exports['1.3.132.0.10'] = 'secp256k1'
 
@@ -6752,7 +7044,7 @@ exports['1.3.132.0.34'] = 'p384'
 
 exports['1.3.132.0.35'] = 'p521'
 
-},{}],41:[function(require,module,exports){
+},{}],43:[function(require,module,exports){
 (function (Buffer){
 // much of this based on https://github.com/indutny/self-signed/blob/gh-pages/lib/rsa.js
 var createHmac = require('create-hmac')
@@ -6941,7 +7233,7 @@ module.exports.getKey = getKey
 module.exports.makeKey = makeKey
 
 }).call(this,require("buffer").Buffer)
-},{"./curves":40,"bn.js":16,"browserify-rsa":37,"buffer":45,"create-hmac":52,"elliptic":64,"parse-asn1":102}],42:[function(require,module,exports){
+},{"./curves":42,"bn.js":18,"browserify-rsa":39,"buffer":48,"create-hmac":55,"elliptic":67,"parse-asn1":106}],44:[function(require,module,exports){
 (function (Buffer){
 // much of this based on https://github.com/indutny/self-signed/blob/gh-pages/lib/rsa.js
 var curves = require('./curves')
@@ -7048,7 +7340,9 @@ function checkValue (b, q) {
 module.exports = verify
 
 }).call(this,require("buffer").Buffer)
-},{"./curves":40,"bn.js":16,"buffer":45,"elliptic":64,"parse-asn1":102}],43:[function(require,module,exports){
+},{"./curves":42,"bn.js":18,"buffer":48,"elliptic":67,"parse-asn1":106}],45:[function(require,module,exports){
+arguments[4][20][0].apply(exports,arguments)
+},{"dup":20}],46:[function(require,module,exports){
 (function (global){
 'use strict';
 
@@ -7160,7 +7454,7 @@ exports.allocUnsafeSlow = function allocUnsafeSlow(size) {
 }
 
 }).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"buffer":45}],44:[function(require,module,exports){
+},{"buffer":48}],47:[function(require,module,exports){
 (function (Buffer){
 module.exports = function xor (a, b) {
   var length = Math.min(a.length, b.length)
@@ -7174,7 +7468,7 @@ module.exports = function xor (a, b) {
 }
 
 }).call(this,require("buffer").Buffer)
-},{"buffer":45}],45:[function(require,module,exports){
+},{"buffer":48}],48:[function(require,module,exports){
 (function (global){
 /*!
  * The buffer module from node.js, for the browser.
@@ -8965,7 +9259,7 @@ function isnan (val) {
 }
 
 }).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"base64-js":15,"ieee754":89,"isarray":93}],46:[function(require,module,exports){
+},{"base64-js":17,"ieee754":92,"isarray":96}],49:[function(require,module,exports){
 (function (Buffer){
 var Transform = require('stream').Transform
 var inherits = require('inherits')
@@ -9059,7 +9353,7 @@ CipherBase.prototype._toString = function (value, enc, final) {
 }
 
 }).call(this,require("buffer").Buffer)
-},{"buffer":45,"inherits":91,"stream":133,"string_decoder":134}],47:[function(require,module,exports){
+},{"buffer":48,"inherits":94,"stream":150,"string_decoder":151}],50:[function(require,module,exports){
 (function (Buffer){
 // Copyright Joyent, Inc. and other Node contributors.
 //
@@ -9170,7 +9464,7 @@ function objectToString(o) {
 }
 
 }).call(this,{"isBuffer":require("../../is-buffer/index.js")})
-},{"../../is-buffer/index.js":92}],48:[function(require,module,exports){
+},{"../../is-buffer/index.js":95}],51:[function(require,module,exports){
 (function (Buffer){
 var elliptic = require('elliptic');
 var BN = require('bn.js');
@@ -9296,7 +9590,7 @@ function formatReturnValue(bn, enc, len) {
 }
 
 }).call(this,require("buffer").Buffer)
-},{"bn.js":16,"buffer":45,"elliptic":64}],49:[function(require,module,exports){
+},{"bn.js":18,"buffer":48,"elliptic":67}],52:[function(require,module,exports){
 (function (Buffer){
 'use strict';
 var inherits = require('inherits')
@@ -9352,7 +9646,7 @@ module.exports = function createHash (alg) {
 }
 
 }).call(this,require("buffer").Buffer)
-},{"./md5":51,"buffer":45,"cipher-base":46,"inherits":91,"ripemd160":124,"sha.js":126}],50:[function(require,module,exports){
+},{"./md5":54,"buffer":48,"cipher-base":49,"inherits":94,"ripemd160":141,"sha.js":143}],53:[function(require,module,exports){
 (function (Buffer){
 'use strict';
 var intSize = 4;
@@ -9389,7 +9683,7 @@ function hash(buf, fn, hashSize, bigEndian) {
 }
 exports.hash = hash;
 }).call(this,require("buffer").Buffer)
-},{"buffer":45}],51:[function(require,module,exports){
+},{"buffer":48}],54:[function(require,module,exports){
 'use strict';
 /*
  * A JavaScript implementation of the RSA Data Security, Inc. MD5 Message
@@ -9546,7 +9840,7 @@ function bit_rol(num, cnt)
 module.exports = function md5(buf) {
   return helpers.hash(buf, core_md5, 16);
 };
-},{"./helpers":50}],52:[function(require,module,exports){
+},{"./helpers":53}],55:[function(require,module,exports){
 (function (Buffer){
 'use strict';
 var createHash = require('create-hash/browser');
@@ -9618,7 +9912,7 @@ module.exports = function createHmac(alg, key) {
 }
 
 }).call(this,require("buffer").Buffer)
-},{"buffer":45,"create-hash/browser":49,"inherits":91,"stream":133}],53:[function(require,module,exports){
+},{"buffer":48,"create-hash/browser":52,"inherits":94,"stream":150}],56:[function(require,module,exports){
 'use strict'
 
 exports.randomBytes = exports.rng = exports.pseudoRandomBytes = exports.prng = require('randombytes')
@@ -9697,7 +9991,7 @@ var publicEncrypt = require('public-encrypt')
   }
 })
 
-},{"browserify-cipher":34,"browserify-sign":39,"browserify-sign/algos":38,"create-ecdh":48,"create-hash":49,"create-hmac":52,"diffie-hellman":60,"pbkdf2":103,"public-encrypt":106,"randombytes":113}],54:[function(require,module,exports){
+},{"browserify-cipher":36,"browserify-sign":41,"browserify-sign/algos":40,"create-ecdh":51,"create-hash":52,"create-hmac":55,"diffie-hellman":63,"pbkdf2":108,"public-encrypt":119,"randombytes":130}],57:[function(require,module,exports){
 'use strict';
 
 exports.utils = require('./des/utils');
@@ -9706,7 +10000,7 @@ exports.DES = require('./des/des');
 exports.CBC = require('./des/cbc');
 exports.EDE = require('./des/ede');
 
-},{"./des/cbc":55,"./des/cipher":56,"./des/des":57,"./des/ede":58,"./des/utils":59}],55:[function(require,module,exports){
+},{"./des/cbc":58,"./des/cipher":59,"./des/des":60,"./des/ede":61,"./des/utils":62}],58:[function(require,module,exports){
 'use strict';
 
 var assert = require('minimalistic-assert');
@@ -9773,7 +10067,7 @@ proto._update = function _update(inp, inOff, out, outOff) {
   }
 };
 
-},{"inherits":91,"minimalistic-assert":98}],56:[function(require,module,exports){
+},{"inherits":94,"minimalistic-assert":102}],59:[function(require,module,exports){
 'use strict';
 
 var assert = require('minimalistic-assert');
@@ -9916,7 +10210,7 @@ Cipher.prototype._finalDecrypt = function _finalDecrypt() {
   return this._unpad(out);
 };
 
-},{"minimalistic-assert":98}],57:[function(require,module,exports){
+},{"minimalistic-assert":102}],60:[function(require,module,exports){
 'use strict';
 
 var assert = require('minimalistic-assert');
@@ -10061,7 +10355,7 @@ DES.prototype._decrypt = function _decrypt(state, lStart, rStart, out, off) {
   utils.rip(l, r, out, off);
 };
 
-},{"../des":54,"inherits":91,"minimalistic-assert":98}],58:[function(require,module,exports){
+},{"../des":57,"inherits":94,"minimalistic-assert":102}],61:[function(require,module,exports){
 'use strict';
 
 var assert = require('minimalistic-assert');
@@ -10118,7 +10412,7 @@ EDE.prototype._update = function _update(inp, inOff, out, outOff) {
 EDE.prototype._pad = DES.prototype._pad;
 EDE.prototype._unpad = DES.prototype._unpad;
 
-},{"../des":54,"inherits":91,"minimalistic-assert":98}],59:[function(require,module,exports){
+},{"../des":57,"inherits":94,"minimalistic-assert":102}],62:[function(require,module,exports){
 'use strict';
 
 exports.readUInt32BE = function readUInt32BE(bytes, off) {
@@ -10376,7 +10670,7 @@ exports.padSplit = function padSplit(num, size, group) {
   return out.join(' ');
 };
 
-},{}],60:[function(require,module,exports){
+},{}],63:[function(require,module,exports){
 (function (Buffer){
 var generatePrime = require('./lib/generatePrime')
 var primes = require('./lib/primes.json')
@@ -10422,7 +10716,7 @@ exports.DiffieHellmanGroup = exports.createDiffieHellmanGroup = exports.getDiffi
 exports.createDiffieHellman = exports.DiffieHellman = createDiffieHellman
 
 }).call(this,require("buffer").Buffer)
-},{"./lib/dh":61,"./lib/generatePrime":62,"./lib/primes.json":63,"buffer":45}],61:[function(require,module,exports){
+},{"./lib/dh":64,"./lib/generatePrime":65,"./lib/primes.json":66,"buffer":48}],64:[function(require,module,exports){
 (function (Buffer){
 var BN = require('bn.js');
 var MillerRabin = require('miller-rabin');
@@ -10590,7 +10884,7 @@ function formatReturnValue(bn, enc) {
 }
 
 }).call(this,require("buffer").Buffer)
-},{"./generatePrime":62,"bn.js":16,"buffer":45,"miller-rabin":97,"randombytes":113}],62:[function(require,module,exports){
+},{"./generatePrime":65,"bn.js":18,"buffer":48,"miller-rabin":101,"randombytes":130}],65:[function(require,module,exports){
 var randomBytes = require('randombytes');
 module.exports = findPrime;
 findPrime.simpleSieve = simpleSieve;
@@ -10697,7 +10991,7 @@ function findPrime(bits, gen) {
 
 }
 
-},{"bn.js":16,"miller-rabin":97,"randombytes":113}],63:[function(require,module,exports){
+},{"bn.js":18,"miller-rabin":101,"randombytes":130}],66:[function(require,module,exports){
 module.exports={
     "modp1": {
         "gen": "02",
@@ -10732,7 +11026,7 @@ module.exports={
         "prime": "ffffffffffffffffc90fdaa22168c234c4c6628b80dc1cd129024e088a67cc74020bbea63b139b22514a08798e3404ddef9519b3cd3a431b302b0a6df25f14374fe1356d6d51c245e485b576625e7ec6f44c42e9a637ed6b0bff5cb6f406b7edee386bfb5a899fa5ae9f24117c4b1fe649286651ece45b3dc2007cb8a163bf0598da48361c55d39a69163fa8fd24cf5f83655d23dca3ad961c62f356208552bb9ed529077096966d670c354e4abc9804f1746c08ca18217c32905e462e36ce3be39e772c180e86039b2783a2ec07a28fb5c55df06f4c52c9de2bcbf6955817183995497cea956ae515d2261898fa051015728e5a8aaac42dad33170d04507a33a85521abdf1cba64ecfb850458dbef0a8aea71575d060c7db3970f85a6e1e4c7abf5ae8cdb0933d71e8c94e04a25619dcee3d2261ad2ee6bf12ffa06d98a0864d87602733ec86a64521f2b18177b200cbbe117577a615d6c770988c0bad946e208e24fa074e5ab3143db5bfce0fd108e4b82d120a92108011a723c12a787e6d788719a10bdba5b2699c327186af4e23c1a946834b6150bda2583e9ca2ad44ce8dbbbc2db04de8ef92e8efc141fbecaa6287c59474e6bc05d99b2964fa090c3a2233ba186515be7ed1f612970cee2d7afb81bdd762170481cd0069127d5b05aa993b4ea988d8fddc186ffb7dc90a6c08f4df435c93402849236c3fab4d27c7026c1d4dcb2602646dec9751e763dba37bdf8ff9406ad9e530ee5db382f413001aeb06a53ed9027d831179727b0865a8918da3edbebcf9b14ed44ce6cbaced4bb1bdb7f1447e6cc254b332051512bd7af426fb8f401378cd2bf5983ca01c64b92ecf032ea15d1721d03f482d7ce6e74fef6d55e702f46980c82b5a84031900b1c9e59e7c97fbec7e8f323a97a7e36cc88be0f1d45b7ff585ac54bd407b22b4154aacc8f6d7ebf48e1d814cc5ed20f8037e0a79715eef29be32806a1d58bb7c5da76f550aa3d8a1fbff0eb19ccb1a313d55cda56c9ec2ef29632387fe8d76e3c0468043e8f663f4860ee12bf2d5b0b7474d6e694f91e6dbe115974a3926f12fee5e438777cb6a932df8cd8bec4d073b931ba3bc832b68d9dd300741fa7bf8afc47ed2576f6936ba424663aab639c5ae4f5683423b4742bf1c978238f16cbe39d652de3fdb8befc848ad922222e04a4037c0713eb57a81a23f0c73473fc646cea306b4bcbc8862f8385ddfa9d4b7fa2c087e879683303ed5bdd3a062b3cf5b3a278a66d2a13f83f44f82ddf310ee074ab6a364597e899a0255dc164f31cc50846851df9ab48195ded7ea1b1d510bd7ee74d73faf36bc31ecfa268359046f4eb879f924009438b481c6cd7889a002ed5ee382bc9190da6fc026e479558e4475677e9aa9e3050e2765694dfc81f56e880b96e7160c980dd98edd3dfffffffffffffffff"
     }
 }
-},{}],64:[function(require,module,exports){
+},{}],67:[function(require,module,exports){
 'use strict';
 
 var elliptic = exports;
@@ -10748,7 +11042,7 @@ elliptic.curves = require('./elliptic/curves');
 elliptic.ec = require('./elliptic/ec');
 elliptic.eddsa = require('./elliptic/eddsa');
 
-},{"../package.json":80,"./elliptic/curve":67,"./elliptic/curves":70,"./elliptic/ec":71,"./elliptic/eddsa":74,"./elliptic/hmac-drbg":77,"./elliptic/utils":79,"brorand":17}],65:[function(require,module,exports){
+},{"../package.json":83,"./elliptic/curve":70,"./elliptic/curves":73,"./elliptic/ec":74,"./elliptic/eddsa":77,"./elliptic/hmac-drbg":80,"./elliptic/utils":82,"brorand":19}],68:[function(require,module,exports){
 'use strict';
 
 var BN = require('bn.js');
@@ -11125,7 +11419,7 @@ BasePoint.prototype.dblp = function dblp(k) {
   return r;
 };
 
-},{"../../elliptic":64,"bn.js":16}],66:[function(require,module,exports){
+},{"../../elliptic":67,"bn.js":18}],69:[function(require,module,exports){
 'use strict';
 
 var curve = require('../curve');
@@ -11560,7 +11854,7 @@ Point.prototype.eqXToP = function eqXToP(x) {
 Point.prototype.toP = Point.prototype.normalize;
 Point.prototype.mixedAdd = Point.prototype.add;
 
-},{"../../elliptic":64,"../curve":67,"bn.js":16,"inherits":91}],67:[function(require,module,exports){
+},{"../../elliptic":67,"../curve":70,"bn.js":18,"inherits":94}],70:[function(require,module,exports){
 'use strict';
 
 var curve = exports;
@@ -11570,7 +11864,7 @@ curve.short = require('./short');
 curve.mont = require('./mont');
 curve.edwards = require('./edwards');
 
-},{"./base":65,"./edwards":66,"./mont":68,"./short":69}],68:[function(require,module,exports){
+},{"./base":68,"./edwards":69,"./mont":71,"./short":72}],71:[function(require,module,exports){
 'use strict';
 
 var curve = require('../curve');
@@ -11752,7 +12046,7 @@ Point.prototype.getX = function getX() {
   return this.x.fromRed();
 };
 
-},{"../../elliptic":64,"../curve":67,"bn.js":16,"inherits":91}],69:[function(require,module,exports){
+},{"../../elliptic":67,"../curve":70,"bn.js":18,"inherits":94}],72:[function(require,module,exports){
 'use strict';
 
 var curve = require('../curve');
@@ -12692,7 +12986,7 @@ JPoint.prototype.isInfinity = function isInfinity() {
   return this.z.cmpn(0) === 0;
 };
 
-},{"../../elliptic":64,"../curve":67,"bn.js":16,"inherits":91}],70:[function(require,module,exports){
+},{"../../elliptic":67,"../curve":70,"bn.js":18,"inherits":94}],73:[function(require,module,exports){
 'use strict';
 
 var curves = exports;
@@ -12899,7 +13193,7 @@ defineCurve('secp256k1', {
   ]
 });
 
-},{"../elliptic":64,"./precomputed/secp256k1":78,"hash.js":83}],71:[function(require,module,exports){
+},{"../elliptic":67,"./precomputed/secp256k1":81,"hash.js":86}],74:[function(require,module,exports){
 'use strict';
 
 var BN = require('bn.js');
@@ -13137,7 +13431,7 @@ EC.prototype.getKeyRecoveryParam = function(e, signature, Q, enc) {
   throw new Error('Unable to find valid recovery factor');
 };
 
-},{"../../elliptic":64,"./key":72,"./signature":73,"bn.js":16}],72:[function(require,module,exports){
+},{"../../elliptic":67,"./key":75,"./signature":76,"bn.js":18}],75:[function(require,module,exports){
 'use strict';
 
 var BN = require('bn.js');
@@ -13246,7 +13540,7 @@ KeyPair.prototype.inspect = function inspect() {
          ' pub: ' + (this.pub && this.pub.inspect()) + ' >';
 };
 
-},{"bn.js":16}],73:[function(require,module,exports){
+},{"bn.js":18}],76:[function(require,module,exports){
 'use strict';
 
 var BN = require('bn.js');
@@ -13383,7 +13677,7 @@ Signature.prototype.toDER = function toDER(enc) {
   return utils.encode(res, enc);
 };
 
-},{"../../elliptic":64,"bn.js":16}],74:[function(require,module,exports){
+},{"../../elliptic":67,"bn.js":18}],77:[function(require,module,exports){
 'use strict';
 
 var hash = require('hash.js');
@@ -13503,7 +13797,7 @@ EDDSA.prototype.isPoint = function isPoint(val) {
   return val instanceof this.pointClass;
 };
 
-},{"../../elliptic":64,"./key":75,"./signature":76,"hash.js":83}],75:[function(require,module,exports){
+},{"../../elliptic":67,"./key":78,"./signature":79,"hash.js":86}],78:[function(require,module,exports){
 'use strict';
 
 var elliptic = require('../../elliptic');
@@ -13601,7 +13895,7 @@ KeyPair.prototype.getPublic = function getPublic(enc) {
 
 module.exports = KeyPair;
 
-},{"../../elliptic":64}],76:[function(require,module,exports){
+},{"../../elliptic":67}],79:[function(require,module,exports){
 'use strict';
 
 var BN = require('bn.js');
@@ -13669,7 +13963,7 @@ Signature.prototype.toHex = function toHex() {
 
 module.exports = Signature;
 
-},{"../../elliptic":64,"bn.js":16}],77:[function(require,module,exports){
+},{"../../elliptic":67,"bn.js":18}],80:[function(require,module,exports){
 'use strict';
 
 var hash = require('hash.js');
@@ -13785,7 +14079,7 @@ HmacDRBG.prototype.generate = function generate(len, enc, add, addEnc) {
   return utils.encode(res, enc);
 };
 
-},{"../elliptic":64,"hash.js":83}],78:[function(require,module,exports){
+},{"../elliptic":67,"hash.js":86}],81:[function(require,module,exports){
 module.exports = {
   doubles: {
     step: 4,
@@ -14567,7 +14861,7 @@ module.exports = {
   }
 };
 
-},{}],79:[function(require,module,exports){
+},{}],82:[function(require,module,exports){
 'use strict';
 
 var utils = exports;
@@ -14741,7 +15035,7 @@ function intFromLE(bytes) {
 utils.intFromLE = intFromLE;
 
 
-},{"bn.js":16}],80:[function(require,module,exports){
+},{"bn.js":18}],83:[function(require,module,exports){
 module.exports={
   "_args": [
     [
@@ -14862,7 +15156,7 @@ module.exports={
   "version": "6.3.1"
 }
 
-},{}],81:[function(require,module,exports){
+},{}],84:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -15166,7 +15460,7 @@ function isUndefined(arg) {
   return arg === void 0;
 }
 
-},{}],82:[function(require,module,exports){
+},{}],85:[function(require,module,exports){
 (function (Buffer){
 var md5 = require('create-hash/md5')
 module.exports = EVP_BytesToKey
@@ -15238,7 +15532,7 @@ function EVP_BytesToKey (password, salt, keyLen, ivLen) {
 }
 
 }).call(this,require("buffer").Buffer)
-},{"buffer":45,"create-hash/md5":51}],83:[function(require,module,exports){
+},{"buffer":48,"create-hash/md5":54}],86:[function(require,module,exports){
 var hash = exports;
 
 hash.utils = require('./hash/utils');
@@ -15255,7 +15549,7 @@ hash.sha384 = hash.sha.sha384;
 hash.sha512 = hash.sha.sha512;
 hash.ripemd160 = hash.ripemd.ripemd160;
 
-},{"./hash/common":84,"./hash/hmac":85,"./hash/ripemd":86,"./hash/sha":87,"./hash/utils":88}],84:[function(require,module,exports){
+},{"./hash/common":87,"./hash/hmac":88,"./hash/ripemd":89,"./hash/sha":90,"./hash/utils":91}],87:[function(require,module,exports){
 var hash = require('../hash');
 var utils = hash.utils;
 var assert = utils.assert;
@@ -15348,7 +15642,7 @@ BlockHash.prototype._pad = function pad() {
   return res;
 };
 
-},{"../hash":83}],85:[function(require,module,exports){
+},{"../hash":86}],88:[function(require,module,exports){
 var hmac = exports;
 
 var hash = require('../hash');
@@ -15398,7 +15692,7 @@ Hmac.prototype.digest = function digest(enc) {
   return this.outer.digest(enc);
 };
 
-},{"../hash":83}],86:[function(require,module,exports){
+},{"../hash":86}],89:[function(require,module,exports){
 var hash = require('../hash');
 var utils = hash.utils;
 
@@ -15544,7 +15838,7 @@ var sh = [
   8, 5, 12, 9, 12, 5, 14, 6, 8, 13, 6, 5, 15, 13, 11, 11
 ];
 
-},{"../hash":83}],87:[function(require,module,exports){
+},{"../hash":86}],90:[function(require,module,exports){
 var hash = require('../hash');
 var utils = hash.utils;
 var assert = utils.assert;
@@ -16110,7 +16404,7 @@ function g1_512_lo(xh, xl) {
   return r;
 }
 
-},{"../hash":83}],88:[function(require,module,exports){
+},{"../hash":86}],91:[function(require,module,exports){
 var utils = exports;
 var inherits = require('inherits');
 
@@ -16369,7 +16663,7 @@ function shr64_lo(ah, al, num) {
 };
 exports.shr64_lo = shr64_lo;
 
-},{"inherits":91}],89:[function(require,module,exports){
+},{"inherits":94}],92:[function(require,module,exports){
 exports.read = function (buffer, offset, isLE, mLen, nBytes) {
   var e, m
   var eLen = nBytes * 8 - mLen - 1
@@ -16455,7 +16749,7 @@ exports.write = function (buffer, value, offset, isLE, mLen, nBytes) {
   buffer[offset + i - d] |= s * 128
 }
 
-},{}],90:[function(require,module,exports){
+},{}],93:[function(require,module,exports){
 
 var indexOf = [].indexOf;
 
@@ -16466,7 +16760,7 @@ module.exports = function(arr, obj){
   }
   return -1;
 };
-},{}],91:[function(require,module,exports){
+},{}],94:[function(require,module,exports){
 if (typeof Object.create === 'function') {
   // implementation from standard node.js 'util' module
   module.exports = function inherits(ctor, superCtor) {
@@ -16491,7 +16785,7 @@ if (typeof Object.create === 'function') {
   }
 }
 
-},{}],92:[function(require,module,exports){
+},{}],95:[function(require,module,exports){
 /*!
  * Determine if an object is a Buffer
  *
@@ -16514,14 +16808,14 @@ function isSlowBuffer (obj) {
   return typeof obj.readFloatLE === 'function' && typeof obj.slice === 'function' && isBuffer(obj.slice(0, 0))
 }
 
-},{}],93:[function(require,module,exports){
+},{}],96:[function(require,module,exports){
 var toString = {}.toString;
 
 module.exports = Array.isArray || function (arr) {
   return toString.call(arr) == '[object Array]';
 };
 
-},{}],94:[function(require,module,exports){
+},{}],97:[function(require,module,exports){
 (function (process,global){
 /**
  * [js-md5]{@link https://github.com/emn178/js-md5}
@@ -17132,7 +17426,7 @@ module.exports = Array.isArray || function (arr) {
 }(this));
 
 }).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"_process":105,"buffer":45,"crypto":53}],95:[function(require,module,exports){
+},{"_process":110,"buffer":48,"crypto":56}],98:[function(require,module,exports){
 exports = module.exports = stringify
 exports.getSerialize = serializer
 
@@ -17161,7 +17455,415 @@ function serializer(replacer, cycleReplacer) {
   }
 }
 
-},{}],96:[function(require,module,exports){
+},{}],99:[function(require,module,exports){
+// # Localize
+// is a GNU gettext-inspired (but not conformant) localization library for
+// Node.js
+
+var path = require('path');
+var fs = require('fs');
+
+function Localize(translations, dateFormats, defaultLocale) {
+
+    // Make sure the defaultLocale is something sane, and set the locale to
+    // its value. Also configure ``Localize`` to throw an error if missing
+    // a translation.
+    defaultLocale = typeof(defaultLocale) === "string" ? defaultLocale : "en";
+    var locale = defaultLocale;
+    var missingTranslationThrow = true;
+
+    // ## The *mergeObjs* function
+    // is a simple helper function to create a new object based on input objects.
+    function mergeObjs() {
+        var outObj = {};
+        for(var i in arguments) {
+            if(arguments[i] instanceof Object) {
+                /* jshint forin: false */
+                for(var j in arguments[i]) {
+                    // Does not check for collisions, newer object
+                    // definitions clobber old definitions
+                    outObj[j] = arguments[i][j];
+                }
+            }
+        }
+        return outObj;
+    }
+
+    // ## The *setLocale* function
+    // simply sets the locale to whatever is specified at the moment, as long as it
+    // is a string.
+    this.setLocale = function(newLocale) {
+        if(typeof(newLocale) === "string") {
+            locale = newLocale;
+        } else {
+            throw new Error("Locale must be a string");
+        }
+    };
+
+    // ## The *strings* object
+    // contains a series of key-val pairs to be used for translating very large strings
+    // that aren't desirable to have duplicated in several locations
+    this.strings = {};
+
+    // ## The *getTranslations* function
+    // is a recursive function that checks the specified directory, and all child
+    // directories, for ``translations.json`` files, combines them into one JSON
+    // object, and returns them.
+    function getTranslations(currDir, translations, strings) {
+        if(fs.existsSync(currDir)) {
+            // Load translations.json file in current directory, if any
+            if(fs.existsSync(path.join(currDir, "translations.json"))) {
+                translations = mergeObjs(translations,
+                    JSON.parse(fs.readFileSync(path.join(path.resolve(currDir), "translations.json")))
+                );
+            }
+            var pathChildren;
+            // Load large text translations in translations subdirectory, if it exists
+            var translationPath = path.join(currDir, "translations");
+            if(fs.existsSync(translationPath) && fs.statSync(translationPath).isDirectory()) {
+                // Get all children in the translations directory
+                pathChildren = fs.readdirSync(translationPath);
+                // Filter out all non-default translations (the ones without a lang type)
+                pathChildren.filter(function(child) {
+                    return !/^.*\..*\..*/.test(child);
+                    // And map these default translations into an object containing the variable name to use,
+                    // the default text, and an array of translations for this text
+                }).map(function(child) {
+                    return {
+                        name: child.replace(/\..*$/, ""),
+                        defaultText: fs.readFileSync(path.join(translationPath, child), 'utf8'),
+                        // To make the array of translations for this default translation, filter out
+                        // all files that do not start with the primary translation filename (minus extension), with a special
+                        // case to filter out the primary translation, as well
+                        translations: pathChildren.filter(function(secondChild) {
+                            return (new RegExp("^" + child.replace(/\..*$/, ""))).test(secondChild) && child !== secondChild;
+                            // Then map this array of files into an object containing the language specified
+                            // and the translation text for this language
+                        }).map(function(secondChild) {
+                            return {
+                                lang: secondChild.replace(/\.[^\.]*$/, "").replace(/^[^\.]*\./, ""),
+                                text: fs.readFileSync(path.join(translationPath, secondChild), 'utf8')
+                            };
+                        })
+                    };
+                    // For each of these long-form translation objects, add the default text to the strings object using the
+                    // desired variable name, and create a translation object for all defined languages for this text.
+                }).forEach(function(translation) {
+                    strings[translation.name] = translation.defaultText;
+                    translations[translation.defaultText] = {};
+                    translation.translations.forEach(function(lang) {
+                        translations[translation.defaultText][lang.lang] = lang.text;
+                    });
+                });
+            }
+            // Recurse down each directory and get the translations for that directory
+            pathChildren = fs.readdirSync(currDir);
+            /* jshint forin: false */
+            for(var child in pathChildren) {
+                var childPath = path.resolve(path.join(currDir, pathChildren[child]));
+                if(fs.statSync(childPath).isDirectory()) {
+                    var tempArray = getTranslations(childPath, translations, strings);
+                    translations = tempArray[0];
+                    strings = tempArray[1];
+                }
+            }
+        } else {
+            throw new Error("Translation Path Invalid");
+        }
+        return [translations, strings];
+    }
+
+    // ## The *validateTranslations* function
+    // determines whether or not the provided JSON object is in a valid
+    // format for ``localize``.
+    function validateTranslations(newTranslations) {
+        if(typeof(newTranslations) !== "object") { return false; }
+        /* jshint forin: false */
+        for(var translation in newTranslations) {
+            if(typeof(translation) !== "string") { return false; }
+            if(typeof(newTranslations[translation]) !== "object" ) { return false; }
+            for(var lang in newTranslations[translation]) {
+                if(typeof(lang) !== "string") { return false; }
+                if(typeof(newTranslations[translation][lang]) !== "string") { return false; }
+            }
+        }
+        return true;
+    }
+
+    // ## The *loadTranslations* function
+    // takes a string or object, and attempts to append the specified translation
+    // to its store of translations, either by loading all translations from the
+    // specified directory (string), or appending the object directly.
+    this.loadTranslations = function(newTranslations) {
+        if(typeof(newTranslations) === "string") {
+            var tempArray = getTranslations(newTranslations, {}, this.strings);
+            newTranslations = tempArray[0];
+            this.strings = tempArray[1];
+        }
+        if(validateTranslations(newTranslations)) {
+            translations = mergeObjs(translations, newTranslations);
+        } else {
+            throw new Error("Must provide a valid set of translations.");
+        }
+    };
+
+    // Now that we have the infrastructure in place, let's verify that the
+    // provided translations are valid.
+    this.loadTranslations(translations);
+
+    // ## The *clearTranslations* function
+    // simply resets the translations variable to a clean slate.
+    this.clearTranslations = function() {
+        translations = {};
+    };
+
+    // ## The *getTranslations* function
+    // simply returns the entire translations object, or returns that portion
+    // of translations matched by the elements of a provided array of text to
+    // translate
+    this.getTranslations = function(textArr) {
+        if(textArr instanceof Array) {
+            var outObj = {};
+            textArr.forEach(function(text) {
+                outObj[text] = translations[text];
+            });
+            return outObj;
+        } else {
+            return translations;
+        }
+    };
+
+    // ## The *throwOnMissingTranslation* function
+    // lets the user decide if a missing translation should cause an Error
+    // to be thrown. Turning it off for development and on for testing is
+    // recommended. The function coerces whatever it receives into a bool.
+    this.throwOnMissingTranslation = function(shouldThrow) {
+        missingTranslationThrow = !!shouldThrow;
+    };
+
+    // ## The *buildString* function
+    // is a string-building function inspired by both ``sprintf`` and
+    // [jQuery Templates](http://api.jquery.com/category/plugins/templates/)
+    // and a small helping of RegExp. The first argument to buildString is
+    // the source string, which has special ``$[x]`` blocks, where ``x`` is
+    // a number from 1 to Infinity, matching the nth argument provided.
+    // Because of ``.toString()``, string formatting _a la_ ``sprintf`` is
+    // avoided, and the numeric identification allows the same parameter to
+    // be used multiple times, and the parameter order need not match the
+    // string referencing order (important for translations)
+    function buildString() {
+        var outString = arguments[0];
+        for(var i = 1; i < arguments.length; i++) {
+            outString = outString.replace(new RegExp("\\$\\[" + i + "\\]", "g"), arguments[i]);
+        }
+        return outString;
+    }
+
+    // ## The *translate* function
+    // is a thin automatic substitution wrapper around ``buildString``. In
+    // fact, it short-circuits to ``buildString`` when ``locale`` equals
+    // ``defaultLocale``. Otherwise, it looks up the required translated
+    // string and executes ``buildString`` on that, instead
+    this.translate = function() {
+        if(locale === defaultLocale) {
+            return buildString.apply(this, arguments);
+        }
+        var newText = translations[arguments[0]] && translations[arguments[0]][locale] ?
+            translations[arguments[0]][locale] : null;
+        if(missingTranslationThrow && typeof(newText) !== "string") {
+            throw new Error("Could not find translation for '" +
+                            arguments[0] + "' in the " + locale + " locale");
+        } else if(typeof(newText) !== "string") {
+            newText = arguments[0];
+        }
+        var newArr = Array.prototype.splice.call(arguments, 1, arguments.length - 1);
+        newArr.unshift(newText);
+        return buildString.apply(this, newArr);
+    };
+
+    // ## The *validateDateFormats* function
+    // determines whether or not the provided dateFormat object conforms to
+    // the necessary structure
+    function validateDateFormats(dateFormats) {
+        if(typeof(dateFormats) !== "object") { return false; }
+        /* jshint forin: false */
+        for(var lang in dateFormats) {
+            if(typeof(lang) !== "string") { return false; }
+            if(typeof(dateFormats[lang]) !== "object") { return false; }
+            if(!(dateFormats[lang].dayNames instanceof Array)) { return false; }
+            if(!(dateFormats[lang].monthNames instanceof Array)) { return false; }
+            if(typeof(dateFormats[lang].masks) !== "object") { return false; }
+            if(typeof(dateFormats[lang].masks["default"]) !== "string") { return false; }
+            if(dateFormats[lang].dayNames.length !== 14) { return false; }
+            if(dateFormats[lang].monthNames.length !== 24) { return false; }
+            for(var i = 0; i < 24; i++) {
+                if(i < 14 && typeof(dateFormats[lang].dayNames[i]) !== "string") { return false; }
+                if(typeof(dateFormats[lang].monthNames[i]) !== "string") { return false; }
+            }
+        }
+        return true;
+    }
+
+    // ## The *loadDateFormats* function
+    // appends the provided ``dateFormats`` object, if valid, to the current
+    // ``dateFormats`` object. Otherwise, it throws an error.
+    this.loadDateFormats = function(newDateFormats) {
+        if(validateDateFormats(newDateFormats)) {
+            dateFormats = mergeObjs(dateFormats, newDateFormats);
+        } else {
+            throw new Error("Invalid Date Format provided");
+        }
+    };
+
+    // ## The *clearDateFormats* function
+    // resets the ``dateFormats`` object to English dates.
+    this.clearDateFormats = function() {
+        dateFormats = {
+            "en": {
+                dayNames: [
+                    "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat",
+                    "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"
+                ],
+                monthNames: [
+                    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+                    "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"
+                ],
+                masks: {
+                    "default":      "ddd mmm dd yyyy HH:MM:ss",
+                    shortDate:      "m/d/yy",
+                    mediumDate:     "mmm d, yyyy",
+                    longDate:       "mmmm d, yyyy",
+                    fullDate:       "dddd, mmmm d, yyyy",
+                    shortTime:      "h:MM TT",
+                    mediumTime:     "h:MM:ss TT",
+                    longTime:       "h:MM:ss TT Z",
+                    isoDate:        "yyyy-mm-dd",
+                    isoTime:        "HH:MM:ss",
+                    isoDateTime:    "yyyy-mm-dd'T'HH:MM:ss",
+                    isoUtcDateTime: "UTC:yyyy-mm-dd'T'HH:MM:ss'Z'"
+                }
+            }
+        };
+    };
+
+    // ## The *getDateFormats* function
+    // returns the currently-defined ``dateFormats`` object
+    this.getDateFormats = function() {
+        return dateFormats;
+    };
+
+    // Now that we have the infrastructure in place, let's validate the
+    // optional ``dateFormats`` object if provided, or initialize it.
+    if(validateDateFormats(dateFormats)) {
+        this.loadDateFormats(dateFormats);
+    } else {
+        this.clearDateFormats();
+    }
+
+    // The *localDate* function
+    // provides easy-to-use date localization support. Based heavily on
+    // [node-dateFormat](https://github.com/felixge/node-dateformat) by
+    // Steven Levithan <stevenlevithan.com>
+    // Scott Trenda <scott.trenda.net>
+    // Kris Kowal <cixar.com/~kris.kowal/>
+    // Felix Geisendörfer <debuggable.com>
+    // MIT Licensed, as with this library. The resultant API is one where
+    // a date string or object is the first argument, a mask string (being
+    // either a key in the ``masks`` object or an arbitrary mask is the
+    // second argument, and a third is a bool flag on whether local or UTC
+    // time should be used.
+    this.localDate = (function() {
+        var	token = /d{1,4}|m{1,4}|yy(?:yy)?|([HhMsTt])\1?|[LloSZ]|"[^"]*"|'[^']*'/g,
+            timezone = /\b(?:[PMCEA][SDP]T|(?:Pacific|Mountain|Central|Eastern|Atlantic) (?:Standard|Daylight|Prevailing) Time|(?:GMT|UTC)(?:[-+]\d{4})?)\b/g,
+            timezoneClip = /[^-+\dA-Z]/g,
+            pad = function (val, len) {
+                val = String(val);
+                len = len || 2;
+                while (val.length < len) val = "0" + val;
+                return val;
+            };
+
+        // Regexes and supporting functions are cached through closure
+        return function (date, mask, utc) {
+            // You can't provide utc if you skip other args (use the "UTC:" mask prefix)
+            if (arguments.length === 1 &&
+                Object.prototype.toString.call(date) === "[object String]" &&
+                !/\d/.test(date)) {
+                mask = date;
+                date = undefined;
+            }
+
+            date = date || new Date();
+
+            if(!(date instanceof Date)) {
+                date = new Date(date);
+            }
+
+            if(isNaN(date)) {
+                throw new TypeError("Invalid date");
+            }
+
+            mask = String(dateFormats[locale].masks[mask] || mask || dateFormats[locale].masks["default"]);
+
+            // Allow setting the utc argument via the mask
+            if (mask.slice(0, 4) === "UTC:") {
+                mask = mask.slice(4);
+                utc = true;
+            }
+
+            var	_ = utc ? "getUTC" : "get",
+                d = date[_ + "Date"](),
+                D = date[_ + "Day"](),
+                m = date[_ + "Month"](),
+                y = date[_ + "FullYear"](),
+                H = date[_ + "Hours"](),
+                M = date[_ + "Minutes"](),
+                s = date[_ + "Seconds"](),
+                L = date[_ + "Milliseconds"](),
+                o = utc ? 0 : date.getTimezoneOffset(),
+                flags = {
+                    d:    d,
+                    dd:   pad(d),
+                    ddd:  dateFormats[locale].dayNames[D],
+                    dddd: dateFormats[locale].dayNames[D + 7],
+                    m:    m + 1,
+                    mm:   pad(m + 1),
+                    mmm:  dateFormats[locale].monthNames[m],
+                    mmmm: dateFormats[locale].monthNames[m + 12],
+                    yy:   String(y).slice(2),
+                    yyyy: y,
+                    h:    H % 12 || 12,
+                    hh:   pad(H % 12 || 12),
+                    H:    H,
+                    HH:   pad(H),
+                    M:    M,
+                    MM:   pad(M),
+                    s:    s,
+                    ss:   pad(s),
+                    l:    pad(L, 3),
+                    L:    pad(L > 99 ? Math.round(L / 10) : L),
+                    t:    H < 12 ? "a"  : "p",
+                    tt:   H < 12 ? "am" : "pm",
+                    T:    H < 12 ? "A"  : "P",
+                    TT:   H < 12 ? "AM" : "PM",
+                    Z:    utc ? "UTC" : (String(date).match(timezone) || [""]).pop().replace(timezoneClip, ""),
+                    o:    (o > 0 ? "-" : "+") + pad(Math.floor(Math.abs(o) / 60) * 100 + Math.abs(o) % 60, 4),
+                    S:    ["th", "st", "nd", "rd"][d % 10 > 3 ? 0 : (d % 100 - d % 10 !== 10) * d % 10]
+                };
+
+            return mask.replace(token, function ($0) {
+                return $0 in flags ? flags[$0] : $0.slice(1, $0.length - 1);
+            });
+        };
+    })();
+
+    return this;
+}
+
+Localize.source = Localize.toString();
+module.exports = Localize;
+
+},{"fs":45,"path":107}],100:[function(require,module,exports){
 (function (global){
 /**
  * @license
@@ -33898,7 +34600,7 @@ function serializer(replacer, cycleReplacer) {
 }.call(this));
 
 }).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{}],97:[function(require,module,exports){
+},{}],101:[function(require,module,exports){
 var bn = require('bn.js');
 var brorand = require('brorand');
 
@@ -34013,7 +34715,7 @@ MillerRabin.prototype.getDivisor = function getDivisor(n, k) {
   return false;
 };
 
-},{"bn.js":16,"brorand":17}],98:[function(require,module,exports){
+},{"bn.js":18,"brorand":19}],102:[function(require,module,exports){
 module.exports = assert;
 
 function assert(val, msg) {
@@ -34026,7 +34728,7 @@ assert.equal = function assertEqual(l, r, msg) {
     throw new Error(msg || ('Assertion failed: ' + l + ' != ' + r));
 };
 
-},{}],99:[function(require,module,exports){
+},{}],103:[function(require,module,exports){
 module.exports={"2.16.840.1.101.3.4.1.1": "aes-128-ecb",
 "2.16.840.1.101.3.4.1.2": "aes-128-cbc",
 "2.16.840.1.101.3.4.1.3": "aes-128-ofb",
@@ -34040,7 +34742,7 @@ module.exports={"2.16.840.1.101.3.4.1.1": "aes-128-ecb",
 "2.16.840.1.101.3.4.1.43": "aes-256-ofb",
 "2.16.840.1.101.3.4.1.44": "aes-256-cfb"
 }
-},{}],100:[function(require,module,exports){
+},{}],104:[function(require,module,exports){
 // from https://github.com/indutny/self-signed/blob/gh-pages/lib/asn1.js
 // Fedor, you are amazing.
 
@@ -34159,7 +34861,7 @@ exports.signature = asn1.define('signature', function () {
   )
 })
 
-},{"asn1.js":1}],101:[function(require,module,exports){
+},{"asn1.js":3}],105:[function(require,module,exports){
 (function (Buffer){
 // adapted from https://github.com/apatil/pemstrip
 var findProc = /Proc-Type: 4,ENCRYPTED\r?\nDEK-Info: AES-((?:128)|(?:192)|(?:256))-CBC,([0-9A-H]+)\r?\n\r?\n([0-9A-z\n\r\+\/\=]+)\r?\n/m
@@ -34193,7 +34895,7 @@ module.exports = function (okey, password) {
 }
 
 }).call(this,require("buffer").Buffer)
-},{"browserify-aes":21,"buffer":45,"evp_bytestokey":82}],102:[function(require,module,exports){
+},{"browserify-aes":23,"buffer":48,"evp_bytestokey":85}],106:[function(require,module,exports){
 (function (Buffer){
 var asn1 = require('./asn1')
 var aesid = require('./aesid.json')
@@ -34298,7 +35000,235 @@ function decrypt (data, password) {
 }
 
 }).call(this,require("buffer").Buffer)
-},{"./aesid.json":99,"./asn1":100,"./fixProc":101,"browserify-aes":21,"buffer":45,"pbkdf2":103}],103:[function(require,module,exports){
+},{"./aesid.json":103,"./asn1":104,"./fixProc":105,"browserify-aes":23,"buffer":48,"pbkdf2":108}],107:[function(require,module,exports){
+(function (process){
+// Copyright Joyent, Inc. and other Node contributors.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a
+// copy of this software and associated documentation files (the
+// "Software"), to deal in the Software without restriction, including
+// without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to permit
+// persons to whom the Software is furnished to do so, subject to the
+// following conditions:
+//
+// The above copyright notice and this permission notice shall be included
+// in all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN
+// NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+// USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+// resolves . and .. elements in a path array with directory names there
+// must be no slashes, empty elements, or device names (c:\) in the array
+// (so also no leading and trailing slashes - it does not distinguish
+// relative and absolute paths)
+function normalizeArray(parts, allowAboveRoot) {
+  // if the path tries to go above the root, `up` ends up > 0
+  var up = 0;
+  for (var i = parts.length - 1; i >= 0; i--) {
+    var last = parts[i];
+    if (last === '.') {
+      parts.splice(i, 1);
+    } else if (last === '..') {
+      parts.splice(i, 1);
+      up++;
+    } else if (up) {
+      parts.splice(i, 1);
+      up--;
+    }
+  }
+
+  // if the path is allowed to go above the root, restore leading ..s
+  if (allowAboveRoot) {
+    for (; up--; up) {
+      parts.unshift('..');
+    }
+  }
+
+  return parts;
+}
+
+// Split a filename into [root, dir, basename, ext], unix version
+// 'root' is just a slash, or nothing.
+var splitPathRe =
+    /^(\/?|)([\s\S]*?)((?:\.{1,2}|[^\/]+?|)(\.[^.\/]*|))(?:[\/]*)$/;
+var splitPath = function(filename) {
+  return splitPathRe.exec(filename).slice(1);
+};
+
+// path.resolve([from ...], to)
+// posix version
+exports.resolve = function() {
+  var resolvedPath = '',
+      resolvedAbsolute = false;
+
+  for (var i = arguments.length - 1; i >= -1 && !resolvedAbsolute; i--) {
+    var path = (i >= 0) ? arguments[i] : process.cwd();
+
+    // Skip empty and invalid entries
+    if (typeof path !== 'string') {
+      throw new TypeError('Arguments to path.resolve must be strings');
+    } else if (!path) {
+      continue;
+    }
+
+    resolvedPath = path + '/' + resolvedPath;
+    resolvedAbsolute = path.charAt(0) === '/';
+  }
+
+  // At this point the path should be resolved to a full absolute path, but
+  // handle relative paths to be safe (might happen when process.cwd() fails)
+
+  // Normalize the path
+  resolvedPath = normalizeArray(filter(resolvedPath.split('/'), function(p) {
+    return !!p;
+  }), !resolvedAbsolute).join('/');
+
+  return ((resolvedAbsolute ? '/' : '') + resolvedPath) || '.';
+};
+
+// path.normalize(path)
+// posix version
+exports.normalize = function(path) {
+  var isAbsolute = exports.isAbsolute(path),
+      trailingSlash = substr(path, -1) === '/';
+
+  // Normalize the path
+  path = normalizeArray(filter(path.split('/'), function(p) {
+    return !!p;
+  }), !isAbsolute).join('/');
+
+  if (!path && !isAbsolute) {
+    path = '.';
+  }
+  if (path && trailingSlash) {
+    path += '/';
+  }
+
+  return (isAbsolute ? '/' : '') + path;
+};
+
+// posix version
+exports.isAbsolute = function(path) {
+  return path.charAt(0) === '/';
+};
+
+// posix version
+exports.join = function() {
+  var paths = Array.prototype.slice.call(arguments, 0);
+  return exports.normalize(filter(paths, function(p, index) {
+    if (typeof p !== 'string') {
+      throw new TypeError('Arguments to path.join must be strings');
+    }
+    return p;
+  }).join('/'));
+};
+
+
+// path.relative(from, to)
+// posix version
+exports.relative = function(from, to) {
+  from = exports.resolve(from).substr(1);
+  to = exports.resolve(to).substr(1);
+
+  function trim(arr) {
+    var start = 0;
+    for (; start < arr.length; start++) {
+      if (arr[start] !== '') break;
+    }
+
+    var end = arr.length - 1;
+    for (; end >= 0; end--) {
+      if (arr[end] !== '') break;
+    }
+
+    if (start > end) return [];
+    return arr.slice(start, end - start + 1);
+  }
+
+  var fromParts = trim(from.split('/'));
+  var toParts = trim(to.split('/'));
+
+  var length = Math.min(fromParts.length, toParts.length);
+  var samePartsLength = length;
+  for (var i = 0; i < length; i++) {
+    if (fromParts[i] !== toParts[i]) {
+      samePartsLength = i;
+      break;
+    }
+  }
+
+  var outputParts = [];
+  for (var i = samePartsLength; i < fromParts.length; i++) {
+    outputParts.push('..');
+  }
+
+  outputParts = outputParts.concat(toParts.slice(samePartsLength));
+
+  return outputParts.join('/');
+};
+
+exports.sep = '/';
+exports.delimiter = ':';
+
+exports.dirname = function(path) {
+  var result = splitPath(path),
+      root = result[0],
+      dir = result[1];
+
+  if (!root && !dir) {
+    // No dirname whatsoever
+    return '.';
+  }
+
+  if (dir) {
+    // It has a dirname, strip trailing slash
+    dir = dir.substr(0, dir.length - 1);
+  }
+
+  return root + dir;
+};
+
+
+exports.basename = function(path, ext) {
+  var f = splitPath(path)[2];
+  // TODO: make this comparison case-insensitive on windows?
+  if (ext && f.substr(-1 * ext.length) === ext) {
+    f = f.substr(0, f.length - ext.length);
+  }
+  return f;
+};
+
+
+exports.extname = function(path) {
+  return splitPath(path)[3];
+};
+
+function filter (xs, f) {
+    if (xs.filter) return xs.filter(f);
+    var res = [];
+    for (var i = 0; i < xs.length; i++) {
+        if (f(xs[i], i, xs)) res.push(xs[i]);
+    }
+    return res;
+}
+
+// String.prototype.substr - negative index don't work in IE8
+var substr = 'ab'.substr(-1) === 'b'
+    ? function (str, start, len) { return str.substr(start, len) }
+    : function (str, start, len) {
+        if (start < 0) start = str.length + start;
+        return str.substr(start, len);
+    }
+;
+
+}).call(this,require('_process'))
+},{"_process":110}],108:[function(require,module,exports){
 (function (Buffer){
 var createHmac = require('create-hmac')
 var MAX_ALLOC = Math.pow(2, 30) - 1 // default in iojs
@@ -34382,7 +35312,7 @@ function pbkdf2Sync (password, salt, iterations, keylen, digest) {
 }
 
 }).call(this,require("buffer").Buffer)
-},{"buffer":45,"create-hmac":52}],104:[function(require,module,exports){
+},{"buffer":48,"create-hmac":55}],109:[function(require,module,exports){
 (function (process){
 'use strict';
 
@@ -34429,7 +35359,7 @@ function nextTick(fn, arg1, arg2, arg3) {
 }
 
 }).call(this,require('_process'))
-},{"_process":105}],105:[function(require,module,exports){
+},{"_process":110}],110:[function(require,module,exports){
 // shim for using process in browser
 var process = module.exports = {};
 
@@ -34591,7 +35521,575 @@ process.chdir = function (dir) {
 };
 process.umask = function() { return 0; };
 
-},{}],106:[function(require,module,exports){
+},{}],111:[function(require,module,exports){
+'use strict';
+
+module.exports = require('./lib')
+
+},{"./lib":116}],112:[function(require,module,exports){
+'use strict';
+
+var asap = require('asap/raw');
+
+function noop() {}
+
+// States:
+//
+// 0 - pending
+// 1 - fulfilled with _value
+// 2 - rejected with _value
+// 3 - adopted the state of another promise, _value
+//
+// once the state is no longer pending (0) it is immutable
+
+// All `_` prefixed properties will be reduced to `_{random number}`
+// at build time to obfuscate them and discourage their use.
+// We don't use symbols or Object.defineProperty to fully hide them
+// because the performance isn't good enough.
+
+
+// to avoid using try/catch inside critical functions, we
+// extract them to here.
+var LAST_ERROR = null;
+var IS_ERROR = {};
+function getThen(obj) {
+  try {
+    return obj.then;
+  } catch (ex) {
+    LAST_ERROR = ex;
+    return IS_ERROR;
+  }
+}
+
+function tryCallOne(fn, a) {
+  try {
+    return fn(a);
+  } catch (ex) {
+    LAST_ERROR = ex;
+    return IS_ERROR;
+  }
+}
+function tryCallTwo(fn, a, b) {
+  try {
+    fn(a, b);
+  } catch (ex) {
+    LAST_ERROR = ex;
+    return IS_ERROR;
+  }
+}
+
+module.exports = Promise;
+
+function Promise(fn) {
+  if (typeof this !== 'object') {
+    throw new TypeError('Promises must be constructed via new');
+  }
+  if (typeof fn !== 'function') {
+    throw new TypeError('not a function');
+  }
+  this._45 = 0;
+  this._81 = 0;
+  this._65 = null;
+  this._54 = null;
+  if (fn === noop) return;
+  doResolve(fn, this);
+}
+Promise._10 = null;
+Promise._97 = null;
+Promise._61 = noop;
+
+Promise.prototype.then = function(onFulfilled, onRejected) {
+  if (this.constructor !== Promise) {
+    return safeThen(this, onFulfilled, onRejected);
+  }
+  var res = new Promise(noop);
+  handle(this, new Handler(onFulfilled, onRejected, res));
+  return res;
+};
+
+function safeThen(self, onFulfilled, onRejected) {
+  return new self.constructor(function (resolve, reject) {
+    var res = new Promise(noop);
+    res.then(resolve, reject);
+    handle(self, new Handler(onFulfilled, onRejected, res));
+  });
+};
+function handle(self, deferred) {
+  while (self._81 === 3) {
+    self = self._65;
+  }
+  if (Promise._10) {
+    Promise._10(self);
+  }
+  if (self._81 === 0) {
+    if (self._45 === 0) {
+      self._45 = 1;
+      self._54 = deferred;
+      return;
+    }
+    if (self._45 === 1) {
+      self._45 = 2;
+      self._54 = [self._54, deferred];
+      return;
+    }
+    self._54.push(deferred);
+    return;
+  }
+  handleResolved(self, deferred);
+}
+
+function handleResolved(self, deferred) {
+  asap(function() {
+    var cb = self._81 === 1 ? deferred.onFulfilled : deferred.onRejected;
+    if (cb === null) {
+      if (self._81 === 1) {
+        resolve(deferred.promise, self._65);
+      } else {
+        reject(deferred.promise, self._65);
+      }
+      return;
+    }
+    var ret = tryCallOne(cb, self._65);
+    if (ret === IS_ERROR) {
+      reject(deferred.promise, LAST_ERROR);
+    } else {
+      resolve(deferred.promise, ret);
+    }
+  });
+}
+function resolve(self, newValue) {
+  // Promise Resolution Procedure: https://github.com/promises-aplus/promises-spec#the-promise-resolution-procedure
+  if (newValue === self) {
+    return reject(
+      self,
+      new TypeError('A promise cannot be resolved with itself.')
+    );
+  }
+  if (
+    newValue &&
+    (typeof newValue === 'object' || typeof newValue === 'function')
+  ) {
+    var then = getThen(newValue);
+    if (then === IS_ERROR) {
+      return reject(self, LAST_ERROR);
+    }
+    if (
+      then === self.then &&
+      newValue instanceof Promise
+    ) {
+      self._81 = 3;
+      self._65 = newValue;
+      finale(self);
+      return;
+    } else if (typeof then === 'function') {
+      doResolve(then.bind(newValue), self);
+      return;
+    }
+  }
+  self._81 = 1;
+  self._65 = newValue;
+  finale(self);
+}
+
+function reject(self, newValue) {
+  self._81 = 2;
+  self._65 = newValue;
+  if (Promise._97) {
+    Promise._97(self, newValue);
+  }
+  finale(self);
+}
+function finale(self) {
+  if (self._45 === 1) {
+    handle(self, self._54);
+    self._54 = null;
+  }
+  if (self._45 === 2) {
+    for (var i = 0; i < self._54.length; i++) {
+      handle(self, self._54[i]);
+    }
+    self._54 = null;
+  }
+}
+
+function Handler(onFulfilled, onRejected, promise){
+  this.onFulfilled = typeof onFulfilled === 'function' ? onFulfilled : null;
+  this.onRejected = typeof onRejected === 'function' ? onRejected : null;
+  this.promise = promise;
+}
+
+/**
+ * Take a potentially misbehaving resolver function and make sure
+ * onFulfilled and onRejected are only called once.
+ *
+ * Makes no guarantees about asynchrony.
+ */
+function doResolve(fn, promise) {
+  var done = false;
+  var res = tryCallTwo(fn, function (value) {
+    if (done) return;
+    done = true;
+    resolve(promise, value);
+  }, function (reason) {
+    if (done) return;
+    done = true;
+    reject(promise, reason);
+  })
+  if (!done && res === IS_ERROR) {
+    done = true;
+    reject(promise, LAST_ERROR);
+  }
+}
+
+},{"asap/raw":2}],113:[function(require,module,exports){
+'use strict';
+
+var Promise = require('./core.js');
+
+module.exports = Promise;
+Promise.prototype.done = function (onFulfilled, onRejected) {
+  var self = arguments.length ? this.then.apply(this, arguments) : this;
+  self.then(null, function (err) {
+    setTimeout(function () {
+      throw err;
+    }, 0);
+  });
+};
+
+},{"./core.js":112}],114:[function(require,module,exports){
+'use strict';
+
+//This file contains the ES6 extensions to the core Promises/A+ API
+
+var Promise = require('./core.js');
+
+module.exports = Promise;
+
+/* Static Functions */
+
+var TRUE = valuePromise(true);
+var FALSE = valuePromise(false);
+var NULL = valuePromise(null);
+var UNDEFINED = valuePromise(undefined);
+var ZERO = valuePromise(0);
+var EMPTYSTRING = valuePromise('');
+
+function valuePromise(value) {
+  var p = new Promise(Promise._61);
+  p._81 = 1;
+  p._65 = value;
+  return p;
+}
+Promise.resolve = function (value) {
+  if (value instanceof Promise) return value;
+
+  if (value === null) return NULL;
+  if (value === undefined) return UNDEFINED;
+  if (value === true) return TRUE;
+  if (value === false) return FALSE;
+  if (value === 0) return ZERO;
+  if (value === '') return EMPTYSTRING;
+
+  if (typeof value === 'object' || typeof value === 'function') {
+    try {
+      var then = value.then;
+      if (typeof then === 'function') {
+        return new Promise(then.bind(value));
+      }
+    } catch (ex) {
+      return new Promise(function (resolve, reject) {
+        reject(ex);
+      });
+    }
+  }
+  return valuePromise(value);
+};
+
+Promise.all = function (arr) {
+  var args = Array.prototype.slice.call(arr);
+
+  return new Promise(function (resolve, reject) {
+    if (args.length === 0) return resolve([]);
+    var remaining = args.length;
+    function res(i, val) {
+      if (val && (typeof val === 'object' || typeof val === 'function')) {
+        if (val instanceof Promise && val.then === Promise.prototype.then) {
+          while (val._81 === 3) {
+            val = val._65;
+          }
+          if (val._81 === 1) return res(i, val._65);
+          if (val._81 === 2) reject(val._65);
+          val.then(function (val) {
+            res(i, val);
+          }, reject);
+          return;
+        } else {
+          var then = val.then;
+          if (typeof then === 'function') {
+            var p = new Promise(then.bind(val));
+            p.then(function (val) {
+              res(i, val);
+            }, reject);
+            return;
+          }
+        }
+      }
+      args[i] = val;
+      if (--remaining === 0) {
+        resolve(args);
+      }
+    }
+    for (var i = 0; i < args.length; i++) {
+      res(i, args[i]);
+    }
+  });
+};
+
+Promise.reject = function (value) {
+  return new Promise(function (resolve, reject) {
+    reject(value);
+  });
+};
+
+Promise.race = function (values) {
+  return new Promise(function (resolve, reject) {
+    values.forEach(function(value){
+      Promise.resolve(value).then(resolve, reject);
+    });
+  });
+};
+
+/* Prototype Methods */
+
+Promise.prototype['catch'] = function (onRejected) {
+  return this.then(null, onRejected);
+};
+
+},{"./core.js":112}],115:[function(require,module,exports){
+'use strict';
+
+var Promise = require('./core.js');
+
+module.exports = Promise;
+Promise.prototype['finally'] = function (f) {
+  return this.then(function (value) {
+    return Promise.resolve(f()).then(function () {
+      return value;
+    });
+  }, function (err) {
+    return Promise.resolve(f()).then(function () {
+      throw err;
+    });
+  });
+};
+
+},{"./core.js":112}],116:[function(require,module,exports){
+'use strict';
+
+module.exports = require('./core.js');
+require('./done.js');
+require('./finally.js');
+require('./es6-extensions.js');
+require('./node-extensions.js');
+require('./synchronous.js');
+
+},{"./core.js":112,"./done.js":113,"./es6-extensions.js":114,"./finally.js":115,"./node-extensions.js":117,"./synchronous.js":118}],117:[function(require,module,exports){
+'use strict';
+
+// This file contains then/promise specific extensions that are only useful
+// for node.js interop
+
+var Promise = require('./core.js');
+var asap = require('asap');
+
+module.exports = Promise;
+
+/* Static Functions */
+
+Promise.denodeify = function (fn, argumentCount) {
+  if (
+    typeof argumentCount === 'number' && argumentCount !== Infinity
+  ) {
+    return denodeifyWithCount(fn, argumentCount);
+  } else {
+    return denodeifyWithoutCount(fn);
+  }
+}
+
+var callbackFn = (
+  'function (err, res) {' +
+  'if (err) { rj(err); } else { rs(res); }' +
+  '}'
+);
+function denodeifyWithCount(fn, argumentCount) {
+  var args = [];
+  for (var i = 0; i < argumentCount; i++) {
+    args.push('a' + i);
+  }
+  var body = [
+    'return function (' + args.join(',') + ') {',
+    'var self = this;',
+    'return new Promise(function (rs, rj) {',
+    'var res = fn.call(',
+    ['self'].concat(args).concat([callbackFn]).join(','),
+    ');',
+    'if (res &&',
+    '(typeof res === "object" || typeof res === "function") &&',
+    'typeof res.then === "function"',
+    ') {rs(res);}',
+    '});',
+    '};'
+  ].join('');
+  return Function(['Promise', 'fn'], body)(Promise, fn);
+}
+function denodeifyWithoutCount(fn) {
+  var fnLength = Math.max(fn.length - 1, 3);
+  var args = [];
+  for (var i = 0; i < fnLength; i++) {
+    args.push('a' + i);
+  }
+  var body = [
+    'return function (' + args.join(',') + ') {',
+    'var self = this;',
+    'var args;',
+    'var argLength = arguments.length;',
+    'if (arguments.length > ' + fnLength + ') {',
+    'args = new Array(arguments.length + 1);',
+    'for (var i = 0; i < arguments.length; i++) {',
+    'args[i] = arguments[i];',
+    '}',
+    '}',
+    'return new Promise(function (rs, rj) {',
+    'var cb = ' + callbackFn + ';',
+    'var res;',
+    'switch (argLength) {',
+    args.concat(['extra']).map(function (_, index) {
+      return (
+        'case ' + (index) + ':' +
+        'res = fn.call(' + ['self'].concat(args.slice(0, index)).concat('cb').join(',') + ');' +
+        'break;'
+      );
+    }).join(''),
+    'default:',
+    'args[argLength] = cb;',
+    'res = fn.apply(self, args);',
+    '}',
+    
+    'if (res &&',
+    '(typeof res === "object" || typeof res === "function") &&',
+    'typeof res.then === "function"',
+    ') {rs(res);}',
+    '});',
+    '};'
+  ].join('');
+
+  return Function(
+    ['Promise', 'fn'],
+    body
+  )(Promise, fn);
+}
+
+Promise.nodeify = function (fn) {
+  return function () {
+    var args = Array.prototype.slice.call(arguments);
+    var callback =
+      typeof args[args.length - 1] === 'function' ? args.pop() : null;
+    var ctx = this;
+    try {
+      return fn.apply(this, arguments).nodeify(callback, ctx);
+    } catch (ex) {
+      if (callback === null || typeof callback == 'undefined') {
+        return new Promise(function (resolve, reject) {
+          reject(ex);
+        });
+      } else {
+        asap(function () {
+          callback.call(ctx, ex);
+        })
+      }
+    }
+  }
+}
+
+Promise.prototype.nodeify = function (callback, ctx) {
+  if (typeof callback != 'function') return this;
+
+  this.then(function (value) {
+    asap(function () {
+      callback.call(ctx, null, value);
+    });
+  }, function (err) {
+    asap(function () {
+      callback.call(ctx, err);
+    });
+  });
+}
+
+},{"./core.js":112,"asap":1}],118:[function(require,module,exports){
+'use strict';
+
+var Promise = require('./core.js');
+
+module.exports = Promise;
+Promise.enableSynchronous = function () {
+  Promise.prototype.isPending = function() {
+    return this.getState() == 0;
+  };
+
+  Promise.prototype.isFulfilled = function() {
+    return this.getState() == 1;
+  };
+
+  Promise.prototype.isRejected = function() {
+    return this.getState() == 2;
+  };
+
+  Promise.prototype.getValue = function () {
+    if (this._81 === 3) {
+      return this._65.getValue();
+    }
+
+    if (!this.isFulfilled()) {
+      throw new Error('Cannot get a value of an unfulfilled promise.');
+    }
+
+    return this._65;
+  };
+
+  Promise.prototype.getReason = function () {
+    if (this._81 === 3) {
+      return this._65.getReason();
+    }
+
+    if (!this.isRejected()) {
+      throw new Error('Cannot get a rejection reason of a non-rejected promise.');
+    }
+
+    return this._65;
+  };
+
+  Promise.prototype.getState = function () {
+    if (this._81 === 3) {
+      return this._65.getState();
+    }
+    if (this._81 === -1 || this._81 === -2) {
+      return 0;
+    }
+
+    return this._81;
+  };
+};
+
+Promise.disableSynchronous = function() {
+  Promise.prototype.isPending = undefined;
+  Promise.prototype.isFulfilled = undefined;
+  Promise.prototype.isRejected = undefined;
+  Promise.prototype.getValue = undefined;
+  Promise.prototype.getReason = undefined;
+  Promise.prototype.getState = undefined;
+};
+
+},{"./core.js":112}],119:[function(require,module,exports){
 exports.publicEncrypt = require('./publicEncrypt');
 exports.privateDecrypt = require('./privateDecrypt');
 
@@ -34602,7 +36100,7 @@ exports.privateEncrypt = function privateEncrypt(key, buf) {
 exports.publicDecrypt = function publicDecrypt(key, buf) {
   return exports.privateDecrypt(key, buf, true);
 };
-},{"./privateDecrypt":108,"./publicEncrypt":109}],107:[function(require,module,exports){
+},{"./privateDecrypt":121,"./publicEncrypt":122}],120:[function(require,module,exports){
 (function (Buffer){
 var createHash = require('create-hash');
 module.exports = function (seed, len) {
@@ -34621,7 +36119,7 @@ function i2ops(c) {
   return out;
 }
 }).call(this,require("buffer").Buffer)
-},{"buffer":45,"create-hash":49}],108:[function(require,module,exports){
+},{"buffer":48,"create-hash":52}],121:[function(require,module,exports){
 (function (Buffer){
 var parseKeys = require('parse-asn1');
 var mgf = require('./mgf');
@@ -34732,7 +36230,7 @@ function compare(a, b){
   return dif;
 }
 }).call(this,require("buffer").Buffer)
-},{"./mgf":107,"./withPublic":110,"./xor":111,"bn.js":16,"browserify-rsa":37,"buffer":45,"create-hash":49,"parse-asn1":102}],109:[function(require,module,exports){
+},{"./mgf":120,"./withPublic":123,"./xor":124,"bn.js":18,"browserify-rsa":39,"buffer":48,"create-hash":52,"parse-asn1":106}],122:[function(require,module,exports){
 (function (Buffer){
 var parseKeys = require('parse-asn1');
 var randomBytes = require('randombytes');
@@ -34830,7 +36328,7 @@ function nonZero(len, crypto) {
   return out;
 }
 }).call(this,require("buffer").Buffer)
-},{"./mgf":107,"./withPublic":110,"./xor":111,"bn.js":16,"browserify-rsa":37,"buffer":45,"create-hash":49,"parse-asn1":102,"randombytes":113}],110:[function(require,module,exports){
+},{"./mgf":120,"./withPublic":123,"./xor":124,"bn.js":18,"browserify-rsa":39,"buffer":48,"create-hash":52,"parse-asn1":106,"randombytes":130}],123:[function(require,module,exports){
 (function (Buffer){
 var bn = require('bn.js');
 function withPublic(paddedMsg, key) {
@@ -34843,7 +36341,7 @@ function withPublic(paddedMsg, key) {
 
 module.exports = withPublic;
 }).call(this,require("buffer").Buffer)
-},{"bn.js":16,"buffer":45}],111:[function(require,module,exports){
+},{"bn.js":18,"buffer":48}],124:[function(require,module,exports){
 module.exports = function xor(a, b) {
   var len = a.length;
   var i = -1;
@@ -34852,7 +36350,723 @@ module.exports = function xor(a, b) {
   }
   return a
 };
-},{}],112:[function(require,module,exports){
+},{}],125:[function(require,module,exports){
+(function (global){
+/*! https://mths.be/punycode v1.4.1 by @mathias */
+;(function(root) {
+
+	/** Detect free variables */
+	var freeExports = typeof exports == 'object' && exports &&
+		!exports.nodeType && exports;
+	var freeModule = typeof module == 'object' && module &&
+		!module.nodeType && module;
+	var freeGlobal = typeof global == 'object' && global;
+	if (
+		freeGlobal.global === freeGlobal ||
+		freeGlobal.window === freeGlobal ||
+		freeGlobal.self === freeGlobal
+	) {
+		root = freeGlobal;
+	}
+
+	/**
+	 * The `punycode` object.
+	 * @name punycode
+	 * @type Object
+	 */
+	var punycode,
+
+	/** Highest positive signed 32-bit float value */
+	maxInt = 2147483647, // aka. 0x7FFFFFFF or 2^31-1
+
+	/** Bootstring parameters */
+	base = 36,
+	tMin = 1,
+	tMax = 26,
+	skew = 38,
+	damp = 700,
+	initialBias = 72,
+	initialN = 128, // 0x80
+	delimiter = '-', // '\x2D'
+
+	/** Regular expressions */
+	regexPunycode = /^xn--/,
+	regexNonASCII = /[^\x20-\x7E]/, // unprintable ASCII chars + non-ASCII chars
+	regexSeparators = /[\x2E\u3002\uFF0E\uFF61]/g, // RFC 3490 separators
+
+	/** Error messages */
+	errors = {
+		'overflow': 'Overflow: input needs wider integers to process',
+		'not-basic': 'Illegal input >= 0x80 (not a basic code point)',
+		'invalid-input': 'Invalid input'
+	},
+
+	/** Convenience shortcuts */
+	baseMinusTMin = base - tMin,
+	floor = Math.floor,
+	stringFromCharCode = String.fromCharCode,
+
+	/** Temporary variable */
+	key;
+
+	/*--------------------------------------------------------------------------*/
+
+	/**
+	 * A generic error utility function.
+	 * @private
+	 * @param {String} type The error type.
+	 * @returns {Error} Throws a `RangeError` with the applicable error message.
+	 */
+	function error(type) {
+		throw new RangeError(errors[type]);
+	}
+
+	/**
+	 * A generic `Array#map` utility function.
+	 * @private
+	 * @param {Array} array The array to iterate over.
+	 * @param {Function} callback The function that gets called for every array
+	 * item.
+	 * @returns {Array} A new array of values returned by the callback function.
+	 */
+	function map(array, fn) {
+		var length = array.length;
+		var result = [];
+		while (length--) {
+			result[length] = fn(array[length]);
+		}
+		return result;
+	}
+
+	/**
+	 * A simple `Array#map`-like wrapper to work with domain name strings or email
+	 * addresses.
+	 * @private
+	 * @param {String} domain The domain name or email address.
+	 * @param {Function} callback The function that gets called for every
+	 * character.
+	 * @returns {Array} A new string of characters returned by the callback
+	 * function.
+	 */
+	function mapDomain(string, fn) {
+		var parts = string.split('@');
+		var result = '';
+		if (parts.length > 1) {
+			// In email addresses, only the domain name should be punycoded. Leave
+			// the local part (i.e. everything up to `@`) intact.
+			result = parts[0] + '@';
+			string = parts[1];
+		}
+		// Avoid `split(regex)` for IE8 compatibility. See #17.
+		string = string.replace(regexSeparators, '\x2E');
+		var labels = string.split('.');
+		var encoded = map(labels, fn).join('.');
+		return result + encoded;
+	}
+
+	/**
+	 * Creates an array containing the numeric code points of each Unicode
+	 * character in the string. While JavaScript uses UCS-2 internally,
+	 * this function will convert a pair of surrogate halves (each of which
+	 * UCS-2 exposes as separate characters) into a single code point,
+	 * matching UTF-16.
+	 * @see `punycode.ucs2.encode`
+	 * @see <https://mathiasbynens.be/notes/javascript-encoding>
+	 * @memberOf punycode.ucs2
+	 * @name decode
+	 * @param {String} string The Unicode input string (UCS-2).
+	 * @returns {Array} The new array of code points.
+	 */
+	function ucs2decode(string) {
+		var output = [],
+		    counter = 0,
+		    length = string.length,
+		    value,
+		    extra;
+		while (counter < length) {
+			value = string.charCodeAt(counter++);
+			if (value >= 0xD800 && value <= 0xDBFF && counter < length) {
+				// high surrogate, and there is a next character
+				extra = string.charCodeAt(counter++);
+				if ((extra & 0xFC00) == 0xDC00) { // low surrogate
+					output.push(((value & 0x3FF) << 10) + (extra & 0x3FF) + 0x10000);
+				} else {
+					// unmatched surrogate; only append this code unit, in case the next
+					// code unit is the high surrogate of a surrogate pair
+					output.push(value);
+					counter--;
+				}
+			} else {
+				output.push(value);
+			}
+		}
+		return output;
+	}
+
+	/**
+	 * Creates a string based on an array of numeric code points.
+	 * @see `punycode.ucs2.decode`
+	 * @memberOf punycode.ucs2
+	 * @name encode
+	 * @param {Array} codePoints The array of numeric code points.
+	 * @returns {String} The new Unicode string (UCS-2).
+	 */
+	function ucs2encode(array) {
+		return map(array, function(value) {
+			var output = '';
+			if (value > 0xFFFF) {
+				value -= 0x10000;
+				output += stringFromCharCode(value >>> 10 & 0x3FF | 0xD800);
+				value = 0xDC00 | value & 0x3FF;
+			}
+			output += stringFromCharCode(value);
+			return output;
+		}).join('');
+	}
+
+	/**
+	 * Converts a basic code point into a digit/integer.
+	 * @see `digitToBasic()`
+	 * @private
+	 * @param {Number} codePoint The basic numeric code point value.
+	 * @returns {Number} The numeric value of a basic code point (for use in
+	 * representing integers) in the range `0` to `base - 1`, or `base` if
+	 * the code point does not represent a value.
+	 */
+	function basicToDigit(codePoint) {
+		if (codePoint - 48 < 10) {
+			return codePoint - 22;
+		}
+		if (codePoint - 65 < 26) {
+			return codePoint - 65;
+		}
+		if (codePoint - 97 < 26) {
+			return codePoint - 97;
+		}
+		return base;
+	}
+
+	/**
+	 * Converts a digit/integer into a basic code point.
+	 * @see `basicToDigit()`
+	 * @private
+	 * @param {Number} digit The numeric value of a basic code point.
+	 * @returns {Number} The basic code point whose value (when used for
+	 * representing integers) is `digit`, which needs to be in the range
+	 * `0` to `base - 1`. If `flag` is non-zero, the uppercase form is
+	 * used; else, the lowercase form is used. The behavior is undefined
+	 * if `flag` is non-zero and `digit` has no uppercase form.
+	 */
+	function digitToBasic(digit, flag) {
+		//  0..25 map to ASCII a..z or A..Z
+		// 26..35 map to ASCII 0..9
+		return digit + 22 + 75 * (digit < 26) - ((flag != 0) << 5);
+	}
+
+	/**
+	 * Bias adaptation function as per section 3.4 of RFC 3492.
+	 * https://tools.ietf.org/html/rfc3492#section-3.4
+	 * @private
+	 */
+	function adapt(delta, numPoints, firstTime) {
+		var k = 0;
+		delta = firstTime ? floor(delta / damp) : delta >> 1;
+		delta += floor(delta / numPoints);
+		for (/* no initialization */; delta > baseMinusTMin * tMax >> 1; k += base) {
+			delta = floor(delta / baseMinusTMin);
+		}
+		return floor(k + (baseMinusTMin + 1) * delta / (delta + skew));
+	}
+
+	/**
+	 * Converts a Punycode string of ASCII-only symbols to a string of Unicode
+	 * symbols.
+	 * @memberOf punycode
+	 * @param {String} input The Punycode string of ASCII-only symbols.
+	 * @returns {String} The resulting string of Unicode symbols.
+	 */
+	function decode(input) {
+		// Don't use UCS-2
+		var output = [],
+		    inputLength = input.length,
+		    out,
+		    i = 0,
+		    n = initialN,
+		    bias = initialBias,
+		    basic,
+		    j,
+		    index,
+		    oldi,
+		    w,
+		    k,
+		    digit,
+		    t,
+		    /** Cached calculation results */
+		    baseMinusT;
+
+		// Handle the basic code points: let `basic` be the number of input code
+		// points before the last delimiter, or `0` if there is none, then copy
+		// the first basic code points to the output.
+
+		basic = input.lastIndexOf(delimiter);
+		if (basic < 0) {
+			basic = 0;
+		}
+
+		for (j = 0; j < basic; ++j) {
+			// if it's not a basic code point
+			if (input.charCodeAt(j) >= 0x80) {
+				error('not-basic');
+			}
+			output.push(input.charCodeAt(j));
+		}
+
+		// Main decoding loop: start just after the last delimiter if any basic code
+		// points were copied; start at the beginning otherwise.
+
+		for (index = basic > 0 ? basic + 1 : 0; index < inputLength; /* no final expression */) {
+
+			// `index` is the index of the next character to be consumed.
+			// Decode a generalized variable-length integer into `delta`,
+			// which gets added to `i`. The overflow checking is easier
+			// if we increase `i` as we go, then subtract off its starting
+			// value at the end to obtain `delta`.
+			for (oldi = i, w = 1, k = base; /* no condition */; k += base) {
+
+				if (index >= inputLength) {
+					error('invalid-input');
+				}
+
+				digit = basicToDigit(input.charCodeAt(index++));
+
+				if (digit >= base || digit > floor((maxInt - i) / w)) {
+					error('overflow');
+				}
+
+				i += digit * w;
+				t = k <= bias ? tMin : (k >= bias + tMax ? tMax : k - bias);
+
+				if (digit < t) {
+					break;
+				}
+
+				baseMinusT = base - t;
+				if (w > floor(maxInt / baseMinusT)) {
+					error('overflow');
+				}
+
+				w *= baseMinusT;
+
+			}
+
+			out = output.length + 1;
+			bias = adapt(i - oldi, out, oldi == 0);
+
+			// `i` was supposed to wrap around from `out` to `0`,
+			// incrementing `n` each time, so we'll fix that now:
+			if (floor(i / out) > maxInt - n) {
+				error('overflow');
+			}
+
+			n += floor(i / out);
+			i %= out;
+
+			// Insert `n` at position `i` of the output
+			output.splice(i++, 0, n);
+
+		}
+
+		return ucs2encode(output);
+	}
+
+	/**
+	 * Converts a string of Unicode symbols (e.g. a domain name label) to a
+	 * Punycode string of ASCII-only symbols.
+	 * @memberOf punycode
+	 * @param {String} input The string of Unicode symbols.
+	 * @returns {String} The resulting Punycode string of ASCII-only symbols.
+	 */
+	function encode(input) {
+		var n,
+		    delta,
+		    handledCPCount,
+		    basicLength,
+		    bias,
+		    j,
+		    m,
+		    q,
+		    k,
+		    t,
+		    currentValue,
+		    output = [],
+		    /** `inputLength` will hold the number of code points in `input`. */
+		    inputLength,
+		    /** Cached calculation results */
+		    handledCPCountPlusOne,
+		    baseMinusT,
+		    qMinusT;
+
+		// Convert the input in UCS-2 to Unicode
+		input = ucs2decode(input);
+
+		// Cache the length
+		inputLength = input.length;
+
+		// Initialize the state
+		n = initialN;
+		delta = 0;
+		bias = initialBias;
+
+		// Handle the basic code points
+		for (j = 0; j < inputLength; ++j) {
+			currentValue = input[j];
+			if (currentValue < 0x80) {
+				output.push(stringFromCharCode(currentValue));
+			}
+		}
+
+		handledCPCount = basicLength = output.length;
+
+		// `handledCPCount` is the number of code points that have been handled;
+		// `basicLength` is the number of basic code points.
+
+		// Finish the basic string - if it is not empty - with a delimiter
+		if (basicLength) {
+			output.push(delimiter);
+		}
+
+		// Main encoding loop:
+		while (handledCPCount < inputLength) {
+
+			// All non-basic code points < n have been handled already. Find the next
+			// larger one:
+			for (m = maxInt, j = 0; j < inputLength; ++j) {
+				currentValue = input[j];
+				if (currentValue >= n && currentValue < m) {
+					m = currentValue;
+				}
+			}
+
+			// Increase `delta` enough to advance the decoder's <n,i> state to <m,0>,
+			// but guard against overflow
+			handledCPCountPlusOne = handledCPCount + 1;
+			if (m - n > floor((maxInt - delta) / handledCPCountPlusOne)) {
+				error('overflow');
+			}
+
+			delta += (m - n) * handledCPCountPlusOne;
+			n = m;
+
+			for (j = 0; j < inputLength; ++j) {
+				currentValue = input[j];
+
+				if (currentValue < n && ++delta > maxInt) {
+					error('overflow');
+				}
+
+				if (currentValue == n) {
+					// Represent delta as a generalized variable-length integer
+					for (q = delta, k = base; /* no condition */; k += base) {
+						t = k <= bias ? tMin : (k >= bias + tMax ? tMax : k - bias);
+						if (q < t) {
+							break;
+						}
+						qMinusT = q - t;
+						baseMinusT = base - t;
+						output.push(
+							stringFromCharCode(digitToBasic(t + qMinusT % baseMinusT, 0))
+						);
+						q = floor(qMinusT / baseMinusT);
+					}
+
+					output.push(stringFromCharCode(digitToBasic(q, 0)));
+					bias = adapt(delta, handledCPCountPlusOne, handledCPCount == basicLength);
+					delta = 0;
+					++handledCPCount;
+				}
+			}
+
+			++delta;
+			++n;
+
+		}
+		return output.join('');
+	}
+
+	/**
+	 * Converts a Punycode string representing a domain name or an email address
+	 * to Unicode. Only the Punycoded parts of the input will be converted, i.e.
+	 * it doesn't matter if you call it on a string that has already been
+	 * converted to Unicode.
+	 * @memberOf punycode
+	 * @param {String} input The Punycoded domain name or email address to
+	 * convert to Unicode.
+	 * @returns {String} The Unicode representation of the given Punycode
+	 * string.
+	 */
+	function toUnicode(input) {
+		return mapDomain(input, function(string) {
+			return regexPunycode.test(string)
+				? decode(string.slice(4).toLowerCase())
+				: string;
+		});
+	}
+
+	/**
+	 * Converts a Unicode string representing a domain name or an email address to
+	 * Punycode. Only the non-ASCII parts of the domain name will be converted,
+	 * i.e. it doesn't matter if you call it with a domain that's already in
+	 * ASCII.
+	 * @memberOf punycode
+	 * @param {String} input The domain name or email address to convert, as a
+	 * Unicode string.
+	 * @returns {String} The Punycode representation of the given domain name or
+	 * email address.
+	 */
+	function toASCII(input) {
+		return mapDomain(input, function(string) {
+			return regexNonASCII.test(string)
+				? 'xn--' + encode(string)
+				: string;
+		});
+	}
+
+	/*--------------------------------------------------------------------------*/
+
+	/** Define the public API */
+	punycode = {
+		/**
+		 * A string representing the current Punycode.js version number.
+		 * @memberOf punycode
+		 * @type String
+		 */
+		'version': '1.4.1',
+		/**
+		 * An object of methods to convert from JavaScript's internal character
+		 * representation (UCS-2) to Unicode code points, and back.
+		 * @see <https://mathiasbynens.be/notes/javascript-encoding>
+		 * @memberOf punycode
+		 * @type Object
+		 */
+		'ucs2': {
+			'decode': ucs2decode,
+			'encode': ucs2encode
+		},
+		'decode': decode,
+		'encode': encode,
+		'toASCII': toASCII,
+		'toUnicode': toUnicode
+	};
+
+	/** Expose `punycode` */
+	// Some AMD build optimizers, like r.js, check for specific condition patterns
+	// like the following:
+	if (
+		typeof define == 'function' &&
+		typeof define.amd == 'object' &&
+		define.amd
+	) {
+		define('punycode', function() {
+			return punycode;
+		});
+	} else if (freeExports && freeModule) {
+		if (module.exports == freeExports) {
+			// in Node.js, io.js, or RingoJS v0.8.0+
+			freeModule.exports = punycode;
+		} else {
+			// in Narwhal or RingoJS v0.7.0-
+			for (key in punycode) {
+				punycode.hasOwnProperty(key) && (freeExports[key] = punycode[key]);
+			}
+		}
+	} else {
+		// in Rhino or a web browser
+		root.punycode = punycode;
+	}
+
+}(this));
+
+}).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
+},{}],126:[function(require,module,exports){
+// Copyright Joyent, Inc. and other Node contributors.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a
+// copy of this software and associated documentation files (the
+// "Software"), to deal in the Software without restriction, including
+// without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to permit
+// persons to whom the Software is furnished to do so, subject to the
+// following conditions:
+//
+// The above copyright notice and this permission notice shall be included
+// in all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN
+// NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+// USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+'use strict';
+
+// If obj.hasOwnProperty has been overridden, then calling
+// obj.hasOwnProperty(prop) will break.
+// See: https://github.com/joyent/node/issues/1707
+function hasOwnProperty(obj, prop) {
+  return Object.prototype.hasOwnProperty.call(obj, prop);
+}
+
+module.exports = function(qs, sep, eq, options) {
+  sep = sep || '&';
+  eq = eq || '=';
+  var obj = {};
+
+  if (typeof qs !== 'string' || qs.length === 0) {
+    return obj;
+  }
+
+  var regexp = /\+/g;
+  qs = qs.split(sep);
+
+  var maxKeys = 1000;
+  if (options && typeof options.maxKeys === 'number') {
+    maxKeys = options.maxKeys;
+  }
+
+  var len = qs.length;
+  // maxKeys <= 0 means that we should not limit keys count
+  if (maxKeys > 0 && len > maxKeys) {
+    len = maxKeys;
+  }
+
+  for (var i = 0; i < len; ++i) {
+    var x = qs[i].replace(regexp, '%20'),
+        idx = x.indexOf(eq),
+        kstr, vstr, k, v;
+
+    if (idx >= 0) {
+      kstr = x.substr(0, idx);
+      vstr = x.substr(idx + 1);
+    } else {
+      kstr = x;
+      vstr = '';
+    }
+
+    k = decodeURIComponent(kstr);
+    v = decodeURIComponent(vstr);
+
+    if (!hasOwnProperty(obj, k)) {
+      obj[k] = v;
+    } else if (isArray(obj[k])) {
+      obj[k].push(v);
+    } else {
+      obj[k] = [obj[k], v];
+    }
+  }
+
+  return obj;
+};
+
+var isArray = Array.isArray || function (xs) {
+  return Object.prototype.toString.call(xs) === '[object Array]';
+};
+
+},{}],127:[function(require,module,exports){
+// Copyright Joyent, Inc. and other Node contributors.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a
+// copy of this software and associated documentation files (the
+// "Software"), to deal in the Software without restriction, including
+// without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to permit
+// persons to whom the Software is furnished to do so, subject to the
+// following conditions:
+//
+// The above copyright notice and this permission notice shall be included
+// in all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN
+// NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+// USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+'use strict';
+
+var stringifyPrimitive = function(v) {
+  switch (typeof v) {
+    case 'string':
+      return v;
+
+    case 'boolean':
+      return v ? 'true' : 'false';
+
+    case 'number':
+      return isFinite(v) ? v : '';
+
+    default:
+      return '';
+  }
+};
+
+module.exports = function(obj, sep, eq, name) {
+  sep = sep || '&';
+  eq = eq || '=';
+  if (obj === null) {
+    obj = undefined;
+  }
+
+  if (typeof obj === 'object') {
+    return map(objectKeys(obj), function(k) {
+      var ks = encodeURIComponent(stringifyPrimitive(k)) + eq;
+      if (isArray(obj[k])) {
+        return map(obj[k], function(v) {
+          return ks + encodeURIComponent(stringifyPrimitive(v));
+        }).join(sep);
+      } else {
+        return ks + encodeURIComponent(stringifyPrimitive(obj[k]));
+      }
+    }).join(sep);
+
+  }
+
+  if (!name) return '';
+  return encodeURIComponent(stringifyPrimitive(name)) + eq +
+         encodeURIComponent(stringifyPrimitive(obj));
+};
+
+var isArray = Array.isArray || function (xs) {
+  return Object.prototype.toString.call(xs) === '[object Array]';
+};
+
+function map (xs, f) {
+  if (xs.map) return xs.map(f);
+  var res = [];
+  for (var i = 0; i < xs.length; i++) {
+    res.push(f(xs[i], i));
+  }
+  return res;
+}
+
+var objectKeys = Object.keys || function (obj) {
+  var res = [];
+  for (var key in obj) {
+    if (Object.prototype.hasOwnProperty.call(obj, key)) res.push(key);
+  }
+  return res;
+};
+
+},{}],128:[function(require,module,exports){
+'use strict';
+
+exports.decode = exports.parse = require('./decode');
+exports.encode = exports.stringify = require('./encode');
+
+},{"./decode":126,"./encode":127}],129:[function(require,module,exports){
 /*
  * random-seed
  * https://github.com/skratchdot/random-seed
@@ -35122,7 +37336,7 @@ uheprng.create = function (seed) {
 };
 module.exports = uheprng;
 
-},{"json-stringify-safe":95}],113:[function(require,module,exports){
+},{"json-stringify-safe":98}],130:[function(require,module,exports){
 (function (process,global,Buffer){
 'use strict'
 
@@ -35162,10 +37376,10 @@ function randomBytes (size, cb) {
 }
 
 }).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {},require("buffer").Buffer)
-},{"_process":105,"buffer":45}],114:[function(require,module,exports){
+},{"_process":110,"buffer":48}],131:[function(require,module,exports){
 module.exports = require("./lib/_stream_duplex.js")
 
-},{"./lib/_stream_duplex.js":115}],115:[function(require,module,exports){
+},{"./lib/_stream_duplex.js":132}],132:[function(require,module,exports){
 // a duplex stream is just a stream that is both readable and writable.
 // Since JS doesn't have multiple prototypal inheritance, this class
 // prototypally inherits from Readable, and then parasitically from
@@ -35241,7 +37455,7 @@ function forEach(xs, f) {
     f(xs[i], i);
   }
 }
-},{"./_stream_readable":117,"./_stream_writable":119,"core-util-is":47,"inherits":91,"process-nextick-args":104}],116:[function(require,module,exports){
+},{"./_stream_readable":134,"./_stream_writable":136,"core-util-is":50,"inherits":94,"process-nextick-args":109}],133:[function(require,module,exports){
 // a passthrough stream.
 // basically just the most minimal sort of Transform stream.
 // Every written chunk gets output as-is.
@@ -35268,7 +37482,7 @@ function PassThrough(options) {
 PassThrough.prototype._transform = function (chunk, encoding, cb) {
   cb(null, chunk);
 };
-},{"./_stream_transform":118,"core-util-is":47,"inherits":91}],117:[function(require,module,exports){
+},{"./_stream_transform":135,"core-util-is":50,"inherits":94}],134:[function(require,module,exports){
 (function (process){
 'use strict';
 
@@ -36164,7 +38378,7 @@ function indexOf(xs, x) {
   return -1;
 }
 }).call(this,require('_process'))
-},{"./_stream_duplex":115,"_process":105,"buffer":45,"buffer-shims":43,"core-util-is":47,"events":81,"inherits":91,"isarray":93,"process-nextick-args":104,"string_decoder/":134,"util":18}],118:[function(require,module,exports){
+},{"./_stream_duplex":132,"_process":110,"buffer":48,"buffer-shims":46,"core-util-is":50,"events":84,"inherits":94,"isarray":96,"process-nextick-args":109,"string_decoder/":151,"util":20}],135:[function(require,module,exports){
 // a transform stream is a readable/writable stream where you do
 // something with the data.  Sometimes it's called a "filter",
 // but that's not a great name for it, since that implies a thing where
@@ -36345,7 +38559,7 @@ function done(stream, er) {
 
   return stream.push(null);
 }
-},{"./_stream_duplex":115,"core-util-is":47,"inherits":91}],119:[function(require,module,exports){
+},{"./_stream_duplex":132,"core-util-is":50,"inherits":94}],136:[function(require,module,exports){
 (function (process){
 // A bit simpler than readable streams.
 // Implement an async ._write(chunk, encoding, cb), and it'll handle all
@@ -36874,10 +39088,10 @@ function CorkedRequest(state) {
   };
 }
 }).call(this,require('_process'))
-},{"./_stream_duplex":115,"_process":105,"buffer":45,"buffer-shims":43,"core-util-is":47,"events":81,"inherits":91,"process-nextick-args":104,"util-deprecate":135}],120:[function(require,module,exports){
+},{"./_stream_duplex":132,"_process":110,"buffer":48,"buffer-shims":46,"core-util-is":50,"events":84,"inherits":94,"process-nextick-args":109,"util-deprecate":154}],137:[function(require,module,exports){
 module.exports = require("./lib/_stream_passthrough.js")
 
-},{"./lib/_stream_passthrough.js":116}],121:[function(require,module,exports){
+},{"./lib/_stream_passthrough.js":133}],138:[function(require,module,exports){
 (function (process){
 var Stream = (function (){
   try {
@@ -36897,13 +39111,13 @@ if (!process.browser && process.env.READABLE_STREAM === 'disable' && Stream) {
 }
 
 }).call(this,require('_process'))
-},{"./lib/_stream_duplex.js":115,"./lib/_stream_passthrough.js":116,"./lib/_stream_readable.js":117,"./lib/_stream_transform.js":118,"./lib/_stream_writable.js":119,"_process":105}],122:[function(require,module,exports){
+},{"./lib/_stream_duplex.js":132,"./lib/_stream_passthrough.js":133,"./lib/_stream_readable.js":134,"./lib/_stream_transform.js":135,"./lib/_stream_writable.js":136,"_process":110}],139:[function(require,module,exports){
 module.exports = require("./lib/_stream_transform.js")
 
-},{"./lib/_stream_transform.js":118}],123:[function(require,module,exports){
+},{"./lib/_stream_transform.js":135}],140:[function(require,module,exports){
 module.exports = require("./lib/_stream_writable.js")
 
-},{"./lib/_stream_writable.js":119}],124:[function(require,module,exports){
+},{"./lib/_stream_writable.js":136}],141:[function(require,module,exports){
 (function (Buffer){
 /*
 CryptoJS v3.1.2
@@ -37117,7 +39331,7 @@ function ripemd160 (message) {
 module.exports = ripemd160
 
 }).call(this,require("buffer").Buffer)
-},{"buffer":45}],125:[function(require,module,exports){
+},{"buffer":48}],142:[function(require,module,exports){
 (function (Buffer){
 // prototype class for hash functions
 function Hash (blockSize, finalSize) {
@@ -37190,7 +39404,7 @@ Hash.prototype._update = function () {
 module.exports = Hash
 
 }).call(this,require("buffer").Buffer)
-},{"buffer":45}],126:[function(require,module,exports){
+},{"buffer":48}],143:[function(require,module,exports){
 var exports = module.exports = function SHA (algorithm) {
   algorithm = algorithm.toLowerCase()
 
@@ -37207,7 +39421,7 @@ exports.sha256 = require('./sha256')
 exports.sha384 = require('./sha384')
 exports.sha512 = require('./sha512')
 
-},{"./sha":127,"./sha1":128,"./sha224":129,"./sha256":130,"./sha384":131,"./sha512":132}],127:[function(require,module,exports){
+},{"./sha":144,"./sha1":145,"./sha224":146,"./sha256":147,"./sha384":148,"./sha512":149}],144:[function(require,module,exports){
 (function (Buffer){
 /*
  * A JavaScript implementation of the Secure Hash Algorithm, SHA-0, as defined
@@ -37304,7 +39518,7 @@ Sha.prototype._hash = function () {
 module.exports = Sha
 
 }).call(this,require("buffer").Buffer)
-},{"./hash":125,"buffer":45,"inherits":91}],128:[function(require,module,exports){
+},{"./hash":142,"buffer":48,"inherits":94}],145:[function(require,module,exports){
 (function (Buffer){
 /*
  * A JavaScript implementation of the Secure Hash Algorithm, SHA-1, as defined
@@ -37406,7 +39620,7 @@ Sha1.prototype._hash = function () {
 module.exports = Sha1
 
 }).call(this,require("buffer").Buffer)
-},{"./hash":125,"buffer":45,"inherits":91}],129:[function(require,module,exports){
+},{"./hash":142,"buffer":48,"inherits":94}],146:[function(require,module,exports){
 (function (Buffer){
 /**
  * A JavaScript implementation of the Secure Hash Algorithm, SHA-256, as defined
@@ -37462,7 +39676,7 @@ Sha224.prototype._hash = function () {
 module.exports = Sha224
 
 }).call(this,require("buffer").Buffer)
-},{"./hash":125,"./sha256":130,"buffer":45,"inherits":91}],130:[function(require,module,exports){
+},{"./hash":142,"./sha256":147,"buffer":48,"inherits":94}],147:[function(require,module,exports){
 (function (Buffer){
 /**
  * A JavaScript implementation of the Secure Hash Algorithm, SHA-256, as defined
@@ -37600,7 +39814,7 @@ Sha256.prototype._hash = function () {
 module.exports = Sha256
 
 }).call(this,require("buffer").Buffer)
-},{"./hash":125,"buffer":45,"inherits":91}],131:[function(require,module,exports){
+},{"./hash":142,"buffer":48,"inherits":94}],148:[function(require,module,exports){
 (function (Buffer){
 var inherits = require('inherits')
 var SHA512 = require('./sha512')
@@ -37660,7 +39874,7 @@ Sha384.prototype._hash = function () {
 module.exports = Sha384
 
 }).call(this,require("buffer").Buffer)
-},{"./hash":125,"./sha512":132,"buffer":45,"inherits":91}],132:[function(require,module,exports){
+},{"./hash":142,"./sha512":149,"buffer":48,"inherits":94}],149:[function(require,module,exports){
 (function (Buffer){
 var inherits = require('inherits')
 var Hash = require('./hash')
@@ -37923,7 +40137,7 @@ Sha512.prototype._hash = function () {
 module.exports = Sha512
 
 }).call(this,require("buffer").Buffer)
-},{"./hash":125,"buffer":45,"inherits":91}],133:[function(require,module,exports){
+},{"./hash":142,"buffer":48,"inherits":94}],150:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -38052,7 +40266,7 @@ Stream.prototype.pipe = function(dest, options) {
   return dest;
 };
 
-},{"events":81,"inherits":91,"readable-stream/duplex.js":114,"readable-stream/passthrough.js":120,"readable-stream/readable.js":121,"readable-stream/transform.js":122,"readable-stream/writable.js":123}],134:[function(require,module,exports){
+},{"events":84,"inherits":94,"readable-stream/duplex.js":131,"readable-stream/passthrough.js":137,"readable-stream/readable.js":138,"readable-stream/transform.js":139,"readable-stream/writable.js":140}],151:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -38275,7 +40489,759 @@ function base64DetectIncompleteChar(buffer) {
   this.charLength = this.charReceived ? 3 : 0;
 }
 
-},{"buffer":45}],135:[function(require,module,exports){
+},{"buffer":48}],152:[function(require,module,exports){
+// Copyright Joyent, Inc. and other Node contributors.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a
+// copy of this software and associated documentation files (the
+// "Software"), to deal in the Software without restriction, including
+// without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to permit
+// persons to whom the Software is furnished to do so, subject to the
+// following conditions:
+//
+// The above copyright notice and this permission notice shall be included
+// in all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN
+// NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+// USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+'use strict';
+
+var punycode = require('punycode');
+var util = require('./util');
+
+exports.parse = urlParse;
+exports.resolve = urlResolve;
+exports.resolveObject = urlResolveObject;
+exports.format = urlFormat;
+
+exports.Url = Url;
+
+function Url() {
+  this.protocol = null;
+  this.slashes = null;
+  this.auth = null;
+  this.host = null;
+  this.port = null;
+  this.hostname = null;
+  this.hash = null;
+  this.search = null;
+  this.query = null;
+  this.pathname = null;
+  this.path = null;
+  this.href = null;
+}
+
+// Reference: RFC 3986, RFC 1808, RFC 2396
+
+// define these here so at least they only have to be
+// compiled once on the first module load.
+var protocolPattern = /^([a-z0-9.+-]+:)/i,
+    portPattern = /:[0-9]*$/,
+
+    // Special case for a simple path URL
+    simplePathPattern = /^(\/\/?(?!\/)[^\?\s]*)(\?[^\s]*)?$/,
+
+    // RFC 2396: characters reserved for delimiting URLs.
+    // We actually just auto-escape these.
+    delims = ['<', '>', '"', '`', ' ', '\r', '\n', '\t'],
+
+    // RFC 2396: characters not allowed for various reasons.
+    unwise = ['{', '}', '|', '\\', '^', '`'].concat(delims),
+
+    // Allowed by RFCs, but cause of XSS attacks.  Always escape these.
+    autoEscape = ['\''].concat(unwise),
+    // Characters that are never ever allowed in a hostname.
+    // Note that any invalid chars are also handled, but these
+    // are the ones that are *expected* to be seen, so we fast-path
+    // them.
+    nonHostChars = ['%', '/', '?', ';', '#'].concat(autoEscape),
+    hostEndingChars = ['/', '?', '#'],
+    hostnameMaxLen = 255,
+    hostnamePartPattern = /^[+a-z0-9A-Z_-]{0,63}$/,
+    hostnamePartStart = /^([+a-z0-9A-Z_-]{0,63})(.*)$/,
+    // protocols that can allow "unsafe" and "unwise" chars.
+    unsafeProtocol = {
+      'javascript': true,
+      'javascript:': true
+    },
+    // protocols that never have a hostname.
+    hostlessProtocol = {
+      'javascript': true,
+      'javascript:': true
+    },
+    // protocols that always contain a // bit.
+    slashedProtocol = {
+      'http': true,
+      'https': true,
+      'ftp': true,
+      'gopher': true,
+      'file': true,
+      'http:': true,
+      'https:': true,
+      'ftp:': true,
+      'gopher:': true,
+      'file:': true
+    },
+    querystring = require('querystring');
+
+function urlParse(url, parseQueryString, slashesDenoteHost) {
+  if (url && util.isObject(url) && url instanceof Url) return url;
+
+  var u = new Url;
+  u.parse(url, parseQueryString, slashesDenoteHost);
+  return u;
+}
+
+Url.prototype.parse = function(url, parseQueryString, slashesDenoteHost) {
+  if (!util.isString(url)) {
+    throw new TypeError("Parameter 'url' must be a string, not " + typeof url);
+  }
+
+  // Copy chrome, IE, opera backslash-handling behavior.
+  // Back slashes before the query string get converted to forward slashes
+  // See: https://code.google.com/p/chromium/issues/detail?id=25916
+  var queryIndex = url.indexOf('?'),
+      splitter =
+          (queryIndex !== -1 && queryIndex < url.indexOf('#')) ? '?' : '#',
+      uSplit = url.split(splitter),
+      slashRegex = /\\/g;
+  uSplit[0] = uSplit[0].replace(slashRegex, '/');
+  url = uSplit.join(splitter);
+
+  var rest = url;
+
+  // trim before proceeding.
+  // This is to support parse stuff like "  http://foo.com  \n"
+  rest = rest.trim();
+
+  if (!slashesDenoteHost && url.split('#').length === 1) {
+    // Try fast path regexp
+    var simplePath = simplePathPattern.exec(rest);
+    if (simplePath) {
+      this.path = rest;
+      this.href = rest;
+      this.pathname = simplePath[1];
+      if (simplePath[2]) {
+        this.search = simplePath[2];
+        if (parseQueryString) {
+          this.query = querystring.parse(this.search.substr(1));
+        } else {
+          this.query = this.search.substr(1);
+        }
+      } else if (parseQueryString) {
+        this.search = '';
+        this.query = {};
+      }
+      return this;
+    }
+  }
+
+  var proto = protocolPattern.exec(rest);
+  if (proto) {
+    proto = proto[0];
+    var lowerProto = proto.toLowerCase();
+    this.protocol = lowerProto;
+    rest = rest.substr(proto.length);
+  }
+
+  // figure out if it's got a host
+  // user@server is *always* interpreted as a hostname, and url
+  // resolution will treat //foo/bar as host=foo,path=bar because that's
+  // how the browser resolves relative URLs.
+  if (slashesDenoteHost || proto || rest.match(/^\/\/[^@\/]+@[^@\/]+/)) {
+    var slashes = rest.substr(0, 2) === '//';
+    if (slashes && !(proto && hostlessProtocol[proto])) {
+      rest = rest.substr(2);
+      this.slashes = true;
+    }
+  }
+
+  if (!hostlessProtocol[proto] &&
+      (slashes || (proto && !slashedProtocol[proto]))) {
+
+    // there's a hostname.
+    // the first instance of /, ?, ;, or # ends the host.
+    //
+    // If there is an @ in the hostname, then non-host chars *are* allowed
+    // to the left of the last @ sign, unless some host-ending character
+    // comes *before* the @-sign.
+    // URLs are obnoxious.
+    //
+    // ex:
+    // http://a@b@c/ => user:a@b host:c
+    // http://a@b?@c => user:a host:c path:/?@c
+
+    // v0.12 TODO(isaacs): This is not quite how Chrome does things.
+    // Review our test case against browsers more comprehensively.
+
+    // find the first instance of any hostEndingChars
+    var hostEnd = -1;
+    for (var i = 0; i < hostEndingChars.length; i++) {
+      var hec = rest.indexOf(hostEndingChars[i]);
+      if (hec !== -1 && (hostEnd === -1 || hec < hostEnd))
+        hostEnd = hec;
+    }
+
+    // at this point, either we have an explicit point where the
+    // auth portion cannot go past, or the last @ char is the decider.
+    var auth, atSign;
+    if (hostEnd === -1) {
+      // atSign can be anywhere.
+      atSign = rest.lastIndexOf('@');
+    } else {
+      // atSign must be in auth portion.
+      // http://a@b/c@d => host:b auth:a path:/c@d
+      atSign = rest.lastIndexOf('@', hostEnd);
+    }
+
+    // Now we have a portion which is definitely the auth.
+    // Pull that off.
+    if (atSign !== -1) {
+      auth = rest.slice(0, atSign);
+      rest = rest.slice(atSign + 1);
+      this.auth = decodeURIComponent(auth);
+    }
+
+    // the host is the remaining to the left of the first non-host char
+    hostEnd = -1;
+    for (var i = 0; i < nonHostChars.length; i++) {
+      var hec = rest.indexOf(nonHostChars[i]);
+      if (hec !== -1 && (hostEnd === -1 || hec < hostEnd))
+        hostEnd = hec;
+    }
+    // if we still have not hit it, then the entire thing is a host.
+    if (hostEnd === -1)
+      hostEnd = rest.length;
+
+    this.host = rest.slice(0, hostEnd);
+    rest = rest.slice(hostEnd);
+
+    // pull out port.
+    this.parseHost();
+
+    // we've indicated that there is a hostname,
+    // so even if it's empty, it has to be present.
+    this.hostname = this.hostname || '';
+
+    // if hostname begins with [ and ends with ]
+    // assume that it's an IPv6 address.
+    var ipv6Hostname = this.hostname[0] === '[' &&
+        this.hostname[this.hostname.length - 1] === ']';
+
+    // validate a little.
+    if (!ipv6Hostname) {
+      var hostparts = this.hostname.split(/\./);
+      for (var i = 0, l = hostparts.length; i < l; i++) {
+        var part = hostparts[i];
+        if (!part) continue;
+        if (!part.match(hostnamePartPattern)) {
+          var newpart = '';
+          for (var j = 0, k = part.length; j < k; j++) {
+            if (part.charCodeAt(j) > 127) {
+              // we replace non-ASCII char with a temporary placeholder
+              // we need this to make sure size of hostname is not
+              // broken by replacing non-ASCII by nothing
+              newpart += 'x';
+            } else {
+              newpart += part[j];
+            }
+          }
+          // we test again with ASCII char only
+          if (!newpart.match(hostnamePartPattern)) {
+            var validParts = hostparts.slice(0, i);
+            var notHost = hostparts.slice(i + 1);
+            var bit = part.match(hostnamePartStart);
+            if (bit) {
+              validParts.push(bit[1]);
+              notHost.unshift(bit[2]);
+            }
+            if (notHost.length) {
+              rest = '/' + notHost.join('.') + rest;
+            }
+            this.hostname = validParts.join('.');
+            break;
+          }
+        }
+      }
+    }
+
+    if (this.hostname.length > hostnameMaxLen) {
+      this.hostname = '';
+    } else {
+      // hostnames are always lower case.
+      this.hostname = this.hostname.toLowerCase();
+    }
+
+    if (!ipv6Hostname) {
+      // IDNA Support: Returns a punycoded representation of "domain".
+      // It only converts parts of the domain name that
+      // have non-ASCII characters, i.e. it doesn't matter if
+      // you call it with a domain that already is ASCII-only.
+      this.hostname = punycode.toASCII(this.hostname);
+    }
+
+    var p = this.port ? ':' + this.port : '';
+    var h = this.hostname || '';
+    this.host = h + p;
+    this.href += this.host;
+
+    // strip [ and ] from the hostname
+    // the host field still retains them, though
+    if (ipv6Hostname) {
+      this.hostname = this.hostname.substr(1, this.hostname.length - 2);
+      if (rest[0] !== '/') {
+        rest = '/' + rest;
+      }
+    }
+  }
+
+  // now rest is set to the post-host stuff.
+  // chop off any delim chars.
+  if (!unsafeProtocol[lowerProto]) {
+
+    // First, make 100% sure that any "autoEscape" chars get
+    // escaped, even if encodeURIComponent doesn't think they
+    // need to be.
+    for (var i = 0, l = autoEscape.length; i < l; i++) {
+      var ae = autoEscape[i];
+      if (rest.indexOf(ae) === -1)
+        continue;
+      var esc = encodeURIComponent(ae);
+      if (esc === ae) {
+        esc = escape(ae);
+      }
+      rest = rest.split(ae).join(esc);
+    }
+  }
+
+
+  // chop off from the tail first.
+  var hash = rest.indexOf('#');
+  if (hash !== -1) {
+    // got a fragment string.
+    this.hash = rest.substr(hash);
+    rest = rest.slice(0, hash);
+  }
+  var qm = rest.indexOf('?');
+  if (qm !== -1) {
+    this.search = rest.substr(qm);
+    this.query = rest.substr(qm + 1);
+    if (parseQueryString) {
+      this.query = querystring.parse(this.query);
+    }
+    rest = rest.slice(0, qm);
+  } else if (parseQueryString) {
+    // no query string, but parseQueryString still requested
+    this.search = '';
+    this.query = {};
+  }
+  if (rest) this.pathname = rest;
+  if (slashedProtocol[lowerProto] &&
+      this.hostname && !this.pathname) {
+    this.pathname = '/';
+  }
+
+  //to support http.request
+  if (this.pathname || this.search) {
+    var p = this.pathname || '';
+    var s = this.search || '';
+    this.path = p + s;
+  }
+
+  // finally, reconstruct the href based on what has been validated.
+  this.href = this.format();
+  return this;
+};
+
+// format a parsed object into a url string
+function urlFormat(obj) {
+  // ensure it's an object, and not a string url.
+  // If it's an obj, this is a no-op.
+  // this way, you can call url_format() on strings
+  // to clean up potentially wonky urls.
+  if (util.isString(obj)) obj = urlParse(obj);
+  if (!(obj instanceof Url)) return Url.prototype.format.call(obj);
+  return obj.format();
+}
+
+Url.prototype.format = function() {
+  var auth = this.auth || '';
+  if (auth) {
+    auth = encodeURIComponent(auth);
+    auth = auth.replace(/%3A/i, ':');
+    auth += '@';
+  }
+
+  var protocol = this.protocol || '',
+      pathname = this.pathname || '',
+      hash = this.hash || '',
+      host = false,
+      query = '';
+
+  if (this.host) {
+    host = auth + this.host;
+  } else if (this.hostname) {
+    host = auth + (this.hostname.indexOf(':') === -1 ?
+        this.hostname :
+        '[' + this.hostname + ']');
+    if (this.port) {
+      host += ':' + this.port;
+    }
+  }
+
+  if (this.query &&
+      util.isObject(this.query) &&
+      Object.keys(this.query).length) {
+    query = querystring.stringify(this.query);
+  }
+
+  var search = this.search || (query && ('?' + query)) || '';
+
+  if (protocol && protocol.substr(-1) !== ':') protocol += ':';
+
+  // only the slashedProtocols get the //.  Not mailto:, xmpp:, etc.
+  // unless they had them to begin with.
+  if (this.slashes ||
+      (!protocol || slashedProtocol[protocol]) && host !== false) {
+    host = '//' + (host || '');
+    if (pathname && pathname.charAt(0) !== '/') pathname = '/' + pathname;
+  } else if (!host) {
+    host = '';
+  }
+
+  if (hash && hash.charAt(0) !== '#') hash = '#' + hash;
+  if (search && search.charAt(0) !== '?') search = '?' + search;
+
+  pathname = pathname.replace(/[?#]/g, function(match) {
+    return encodeURIComponent(match);
+  });
+  search = search.replace('#', '%23');
+
+  return protocol + host + pathname + search + hash;
+};
+
+function urlResolve(source, relative) {
+  return urlParse(source, false, true).resolve(relative);
+}
+
+Url.prototype.resolve = function(relative) {
+  return this.resolveObject(urlParse(relative, false, true)).format();
+};
+
+function urlResolveObject(source, relative) {
+  if (!source) return relative;
+  return urlParse(source, false, true).resolveObject(relative);
+}
+
+Url.prototype.resolveObject = function(relative) {
+  if (util.isString(relative)) {
+    var rel = new Url();
+    rel.parse(relative, false, true);
+    relative = rel;
+  }
+
+  var result = new Url();
+  var tkeys = Object.keys(this);
+  for (var tk = 0; tk < tkeys.length; tk++) {
+    var tkey = tkeys[tk];
+    result[tkey] = this[tkey];
+  }
+
+  // hash is always overridden, no matter what.
+  // even href="" will remove it.
+  result.hash = relative.hash;
+
+  // if the relative url is empty, then there's nothing left to do here.
+  if (relative.href === '') {
+    result.href = result.format();
+    return result;
+  }
+
+  // hrefs like //foo/bar always cut to the protocol.
+  if (relative.slashes && !relative.protocol) {
+    // take everything except the protocol from relative
+    var rkeys = Object.keys(relative);
+    for (var rk = 0; rk < rkeys.length; rk++) {
+      var rkey = rkeys[rk];
+      if (rkey !== 'protocol')
+        result[rkey] = relative[rkey];
+    }
+
+    //urlParse appends trailing / to urls like http://www.example.com
+    if (slashedProtocol[result.protocol] &&
+        result.hostname && !result.pathname) {
+      result.path = result.pathname = '/';
+    }
+
+    result.href = result.format();
+    return result;
+  }
+
+  if (relative.protocol && relative.protocol !== result.protocol) {
+    // if it's a known url protocol, then changing
+    // the protocol does weird things
+    // first, if it's not file:, then we MUST have a host,
+    // and if there was a path
+    // to begin with, then we MUST have a path.
+    // if it is file:, then the host is dropped,
+    // because that's known to be hostless.
+    // anything else is assumed to be absolute.
+    if (!slashedProtocol[relative.protocol]) {
+      var keys = Object.keys(relative);
+      for (var v = 0; v < keys.length; v++) {
+        var k = keys[v];
+        result[k] = relative[k];
+      }
+      result.href = result.format();
+      return result;
+    }
+
+    result.protocol = relative.protocol;
+    if (!relative.host && !hostlessProtocol[relative.protocol]) {
+      var relPath = (relative.pathname || '').split('/');
+      while (relPath.length && !(relative.host = relPath.shift()));
+      if (!relative.host) relative.host = '';
+      if (!relative.hostname) relative.hostname = '';
+      if (relPath[0] !== '') relPath.unshift('');
+      if (relPath.length < 2) relPath.unshift('');
+      result.pathname = relPath.join('/');
+    } else {
+      result.pathname = relative.pathname;
+    }
+    result.search = relative.search;
+    result.query = relative.query;
+    result.host = relative.host || '';
+    result.auth = relative.auth;
+    result.hostname = relative.hostname || relative.host;
+    result.port = relative.port;
+    // to support http.request
+    if (result.pathname || result.search) {
+      var p = result.pathname || '';
+      var s = result.search || '';
+      result.path = p + s;
+    }
+    result.slashes = result.slashes || relative.slashes;
+    result.href = result.format();
+    return result;
+  }
+
+  var isSourceAbs = (result.pathname && result.pathname.charAt(0) === '/'),
+      isRelAbs = (
+          relative.host ||
+          relative.pathname && relative.pathname.charAt(0) === '/'
+      ),
+      mustEndAbs = (isRelAbs || isSourceAbs ||
+                    (result.host && relative.pathname)),
+      removeAllDots = mustEndAbs,
+      srcPath = result.pathname && result.pathname.split('/') || [],
+      relPath = relative.pathname && relative.pathname.split('/') || [],
+      psychotic = result.protocol && !slashedProtocol[result.protocol];
+
+  // if the url is a non-slashed url, then relative
+  // links like ../.. should be able
+  // to crawl up to the hostname, as well.  This is strange.
+  // result.protocol has already been set by now.
+  // Later on, put the first path part into the host field.
+  if (psychotic) {
+    result.hostname = '';
+    result.port = null;
+    if (result.host) {
+      if (srcPath[0] === '') srcPath[0] = result.host;
+      else srcPath.unshift(result.host);
+    }
+    result.host = '';
+    if (relative.protocol) {
+      relative.hostname = null;
+      relative.port = null;
+      if (relative.host) {
+        if (relPath[0] === '') relPath[0] = relative.host;
+        else relPath.unshift(relative.host);
+      }
+      relative.host = null;
+    }
+    mustEndAbs = mustEndAbs && (relPath[0] === '' || srcPath[0] === '');
+  }
+
+  if (isRelAbs) {
+    // it's absolute.
+    result.host = (relative.host || relative.host === '') ?
+                  relative.host : result.host;
+    result.hostname = (relative.hostname || relative.hostname === '') ?
+                      relative.hostname : result.hostname;
+    result.search = relative.search;
+    result.query = relative.query;
+    srcPath = relPath;
+    // fall through to the dot-handling below.
+  } else if (relPath.length) {
+    // it's relative
+    // throw away the existing file, and take the new path instead.
+    if (!srcPath) srcPath = [];
+    srcPath.pop();
+    srcPath = srcPath.concat(relPath);
+    result.search = relative.search;
+    result.query = relative.query;
+  } else if (!util.isNullOrUndefined(relative.search)) {
+    // just pull out the search.
+    // like href='?foo'.
+    // Put this after the other two cases because it simplifies the booleans
+    if (psychotic) {
+      result.hostname = result.host = srcPath.shift();
+      //occationaly the auth can get stuck only in host
+      //this especially happens in cases like
+      //url.resolveObject('mailto:local1@domain1', 'local2@domain2')
+      var authInHost = result.host && result.host.indexOf('@') > 0 ?
+                       result.host.split('@') : false;
+      if (authInHost) {
+        result.auth = authInHost.shift();
+        result.host = result.hostname = authInHost.shift();
+      }
+    }
+    result.search = relative.search;
+    result.query = relative.query;
+    //to support http.request
+    if (!util.isNull(result.pathname) || !util.isNull(result.search)) {
+      result.path = (result.pathname ? result.pathname : '') +
+                    (result.search ? result.search : '');
+    }
+    result.href = result.format();
+    return result;
+  }
+
+  if (!srcPath.length) {
+    // no path at all.  easy.
+    // we've already handled the other stuff above.
+    result.pathname = null;
+    //to support http.request
+    if (result.search) {
+      result.path = '/' + result.search;
+    } else {
+      result.path = null;
+    }
+    result.href = result.format();
+    return result;
+  }
+
+  // if a url ENDs in . or .., then it must get a trailing slash.
+  // however, if it ends in anything else non-slashy,
+  // then it must NOT get a trailing slash.
+  var last = srcPath.slice(-1)[0];
+  var hasTrailingSlash = (
+      (result.host || relative.host || srcPath.length > 1) &&
+      (last === '.' || last === '..') || last === '');
+
+  // strip single dots, resolve double dots to parent dir
+  // if the path tries to go above the root, `up` ends up > 0
+  var up = 0;
+  for (var i = srcPath.length; i >= 0; i--) {
+    last = srcPath[i];
+    if (last === '.') {
+      srcPath.splice(i, 1);
+    } else if (last === '..') {
+      srcPath.splice(i, 1);
+      up++;
+    } else if (up) {
+      srcPath.splice(i, 1);
+      up--;
+    }
+  }
+
+  // if the path is allowed to go above the root, restore leading ..s
+  if (!mustEndAbs && !removeAllDots) {
+    for (; up--; up) {
+      srcPath.unshift('..');
+    }
+  }
+
+  if (mustEndAbs && srcPath[0] !== '' &&
+      (!srcPath[0] || srcPath[0].charAt(0) !== '/')) {
+    srcPath.unshift('');
+  }
+
+  if (hasTrailingSlash && (srcPath.join('/').substr(-1) !== '/')) {
+    srcPath.push('');
+  }
+
+  var isAbsolute = srcPath[0] === '' ||
+      (srcPath[0] && srcPath[0].charAt(0) === '/');
+
+  // put the host back
+  if (psychotic) {
+    result.hostname = result.host = isAbsolute ? '' :
+                                    srcPath.length ? srcPath.shift() : '';
+    //occationaly the auth can get stuck only in host
+    //this especially happens in cases like
+    //url.resolveObject('mailto:local1@domain1', 'local2@domain2')
+    var authInHost = result.host && result.host.indexOf('@') > 0 ?
+                     result.host.split('@') : false;
+    if (authInHost) {
+      result.auth = authInHost.shift();
+      result.host = result.hostname = authInHost.shift();
+    }
+  }
+
+  mustEndAbs = mustEndAbs || (result.host && srcPath.length);
+
+  if (mustEndAbs && !isAbsolute) {
+    srcPath.unshift('');
+  }
+
+  if (!srcPath.length) {
+    result.pathname = null;
+    result.path = null;
+  } else {
+    result.pathname = srcPath.join('/');
+  }
+
+  //to support request.http
+  if (!util.isNull(result.pathname) || !util.isNull(result.search)) {
+    result.path = (result.pathname ? result.pathname : '') +
+                  (result.search ? result.search : '');
+  }
+  result.auth = relative.auth || result.auth;
+  result.slashes = result.slashes || relative.slashes;
+  result.href = result.format();
+  return result;
+};
+
+Url.prototype.parseHost = function() {
+  var host = this.host;
+  var port = portPattern.exec(host);
+  if (port) {
+    port = port[0];
+    if (port !== ':') {
+      this.port = port.substr(1);
+    }
+    host = host.substr(0, host.length - port.length);
+  }
+  if (host) this.hostname = host;
+};
+
+},{"./util":153,"punycode":125,"querystring":128}],153:[function(require,module,exports){
+'use strict';
+
+module.exports = {
+  isString: function(arg) {
+    return typeof(arg) === 'string';
+  },
+  isObject: function(arg) {
+    return typeof(arg) === 'object' && arg !== null;
+  },
+  isNull: function(arg) {
+    return arg === null;
+  },
+  isNullOrUndefined: function(arg) {
+    return arg == null;
+  }
+};
+
+},{}],154:[function(require,module,exports){
 (function (global){
 
 /**
@@ -38346,7 +41312,7 @@ function config (name) {
 }
 
 }).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{}],136:[function(require,module,exports){
+},{}],155:[function(require,module,exports){
 var indexOf = require('indexof');
 
 var Object_keys = function (obj) {
@@ -38486,7 +41452,7 @@ exports.createContext = Script.createContext = function (context) {
     return copy;
 };
 
-},{"indexof":90}],137:[function(require,module,exports){
+},{"indexof":93}],156:[function(require,module,exports){
 'use strict';
 var RandGenerator = require('random-seed');
 
@@ -38520,7 +41486,7 @@ Board.prototype = {
 };
 
 module.exports = Board;
-},{"random-seed":112}],138:[function(require,module,exports){
+},{"random-seed":129}],157:[function(require,module,exports){
 'use strict';
 /* global Phaser */
 
@@ -38565,7 +41531,196 @@ Object.defineProperty(LabelButton.prototype, 'width', {
 });
 
 module.exports = LabelButton;
-},{}],139:[function(require,module,exports){
+},{}],158:[function(require,module,exports){
+'use strict';
+/* global window, XMLHttpRequest */
+var Promise = require('promise');
+var url = require('url');
+var md5 = require('js-md5');
+
+var settings = require('./settings.js');
+
+var API = {
+	init: function() {
+		return this.getUser();
+	},
+	user: null,
+	sendRequest: function(uri) {
+		console.log('uri', uri);
+		return new Promise(function(resolve, reject) {
+			var signature = md5(uri + settings.privateKey);
+			uri += '&signature=' + signature;
+			
+			var request = new XMLHttpRequest();
+			request.open('GET', uri, true);
+			request.onload = function() {
+				if (request.status >= 200 && request.status < 400) {
+					var data = JSON.parse(request.responseText);
+					resolve(data);
+				} else {
+					reject();
+				}
+			};
+			request.send();
+		});
+	},
+	getUser: function() {
+		return new Promise(function(resolve, reject) {
+			if (API.user === null) {
+				var urlParts = url.parse(window.location.href, true);
+				var params = urlParts.query;
+
+				
+				API.user = {
+					username: params.gjapi_username || '',
+					token: params.gjapi_token || '',
+					guest: typeof(params.gjapi_username) === 'undefined' || typeof(params.gjapi_token) === 'undefined'
+				};
+			
+				return API.sendRequest('http://gamejolt.com/api/game/v1/users/auth/?game_id=' + settings.gameId + '&username=' + API.user.username + '&user_token=' + API.user.token + '&format=json')
+					.then(function() {
+						resolve(API.user);
+					})
+					.catch(function() {
+						API.user = null;
+						reject();
+					});
+			} else {
+				resolve(API.user);
+			}
+		});
+	},
+	setData: function(key, data) {
+		var uri = 'http://gamejolt.com/api/game/v1/data-store/set/?game_id=' + settings.gameId + '&key=' + key + '&data=' + data + '&format=json';
+
+		return API.sendRequest(uri);
+	},
+	getData: function(key) {
+		var uri = 'http://gamejolt.com/api/game/v1/data-store/?game_id=' + settings.gameId + '&key=' + key + '&format=json';
+
+		return API.sendRequest(uri);
+	},
+	setUserData: function(key, data) {
+		return API.getUser()
+			.then(function() {
+				var uri = 'http://gamejolt.com/api/game/v1/data-store/set/?game_id=' + settings.gameId + '&username=' + API.user.username + '&user_token=' + API.user.token + '&key=' + key + '&data=' + data + '&format=json';
+				
+				return API.sendRequest(uri);
+			});
+	},
+	getUserData: function(key) {
+		return API.getUser()
+			.then(function() {
+				var uri = 'http://gamejolt.com/api/game/v1/data-store/?game_id=' + settings.gameId + '&username=' + API.user.username + '&user_token=' + API.user.token + '&key=' + key + '&format=json';
+				
+				return API.sendRequest(uri);
+			});
+	},
+	setTrophies: function() {
+		// TODO: implement 
+	},
+	getTrophies: function() {
+		// TODO: implement 
+	},
+	setUserScore: function(score, value, tableId) {
+		return API.getUser()
+			.then(function() {
+				var uri = 'http://gamejolt.com/api/game/v1/scores/add/?game_id=' + settings.gameId + '&username=' + API.user.username + '&user_token=' + API.user.token + '&score=' + score + '&sort=' + value + '&format=json';
+				
+				if (typeof tableId !== 'undefined') {
+					uri += '&table_id=' + tableId;
+				}
+				
+				return API.sendRequest(uri);
+			});
+	},
+	getScore: function() {
+		// TODO: implement 
+	}
+};
+
+module.exports = API;
+},{"./settings.js":159,"js-md5":97,"promise":111,"url":152}],159:[function(require,module,exports){
+'use strict';
+
+module.exports = {
+	gameId: 181484,
+	privateKey: '9181738a6909b36d2c86bfec93780d2f'
+};
+},{}],160:[function(require,module,exports){
+'use strict';
+/* global localStorage, kongregateAPI */
+var Promise = require('promise');
+var kongregate = null;
+
+var authenticationPromise = null;
+
+var InitApi = new Promise(function(resolve) {
+	console.log('init kongregate api');
+	if (kongregate === null) {
+		console.log('load kongregate api', kongregate);
+		kongregateAPI.loadAPI(function () {
+			kongregate = kongregateAPI.getAPI();
+			console.log('kongregate ready', kongregate);
+			
+			kongregate.services.addEventListener('login', function() {
+				console.log('authenticated');
+				authenticationPromise.resolve();
+			});
+			
+			console.log('resolve kongregate api');
+			resolve();
+		});
+	} else {
+		console.log('return kongregate api');
+		resolve();
+	}
+});
+
+var API = {
+	init: function() {
+		authenticationPromise = new Promise(function(resolve) {
+			if (!API.user.guest) {
+				resolve();
+			}
+		});
+		return this.getUser();
+	},
+	authenticate: function() {
+		return authenticationPromise;
+	},
+	user: null,
+	getUser: function() {
+		return InitApi
+			.then(function() {
+				API.user = {
+					userId: kongregate.services.getUserId(),
+					username: kongregate.services.getUsername(),
+					token: kongregate.services.getGameAuthToken(),
+					guest: kongregate.services.isGuest()
+				};
+				
+				console.log('getUserData', kongregate.services.isGuest(), API.user);
+			});
+	},
+	getUserData: function(key) {
+		return API.getUser()
+			.then(function() {
+				// TODO: replace with playfab implementation
+				return JSON.parse(localStorage.getItem(key));
+			});
+	},
+	setUserData: function(key, value) {
+		return API.getUser()
+			.then(function() {
+				// TODO: replace with playfab implementation
+				localStorage.setItem(key, JSON.stringify(value));
+			});
+	}
+};
+
+module.exports = API;
+},{"promise":111}],161:[function(require,module,exports){
 /* global Phaser */
 
 (function () {
@@ -38576,10 +41731,26 @@ module.exports = LabelButton;
 	var PreloadState = require('./states/preload.js');
 	var IntroState = require('./states/intro.js');
 	var game = new Phaser.Game(800, 600, Phaser.AUTO, 'game');
-
+	
+	var ServiceSetupState = null;
+	var ServiceApi = null;
+	
+	switch ('kongregate') {
+		case 'kongregate':
+			ServiceSetupState = require('./states/kongregate.js');
+			ServiceApi = require('./kongregate/api.js');
+			break;
+		case 'gamejolt':
+			ServiceSetupState = require('./states/gamejolt.js');
+			ServiceApi = require('./gamejolt/api.js');
+			break;
+	}
+	
+	game.service = ServiceApi;
 	// Game States
 
 	game.state.add('boot', BootState);
+	game.state.add('service', ServiceSetupState);
 	game.state.add('preload', PreloadState);
 	game.state.add('intro', IntroState);
 	game.state.add('finish', FinishState);
@@ -38588,9 +41759,9 @@ module.exports = LabelButton;
 
 	game.state.start('boot');
 
-	console.log("Game started");
+	console.log("Game started", game);
 })();
-},{"./states/boot.js":141,"./states/finish.js":142,"./states/intro.js":143,"./states/menu.js":144,"./states/play.js":145,"./states/preload.js":146}],140:[function(require,module,exports){
+},{"./gamejolt/api.js":158,"./kongregate/api.js":160,"./states/boot.js":163,"./states/finish.js":164,"./states/gamejolt.js":165,"./states/intro.js":166,"./states/kongregate.js":167,"./states/menu.js":168,"./states/play.js":169,"./states/preload.js":170}],162:[function(require,module,exports){
 var _ = require('lodash');
 
 var Bot = function (vertical, horizontal) {
@@ -38645,9 +41816,9 @@ Bot.prototype = {
 };
 
 module.exports = Bot;
-},{"lodash":96}],141:[function(require,module,exports){
-/* global window */
+},{"lodash":100}],163:[function(require,module,exports){
 'use strict';
+/* global window */
 
 function Boot() {
 }
@@ -38659,10 +41830,16 @@ Boot.prototype = {
 	create: function() {
 		this.game.input.maxPointers = 1;
 		this.game.state.start('preload');
+		this.game.lang = 'en';
+		this.game.theme = {
+			//font: 'Exo'
+			font: 'Ubuntu'
+		};
 		
 		window.WebFontConfig = {
 			google: {
-				families: ['VT323']
+				//families: ['Exo::latin-ext']
+				families: ['Ubuntu::latin-ext']
 			}
 		};
 	}
@@ -38670,11 +41847,64 @@ Boot.prototype = {
 
 module.exports = Boot;
 
-},{}],142:[function(require,module,exports){
+},{}],164:[function(require,module,exports){
 'use strict';
-/* global Phaser, localStorage */
+/* global Phaser */
 var md5 = require('js-md5');
 var _ = require('lodash');
+var Localize = require('localize');
+var localization = new Localize({
+    'Perfect!': {
+        pl: 'Doskonale!'
+    },
+    'Great!': {
+        pl: 'Wspaniale!'
+    },
+    'Succes!': {
+        pl: 'Wygrana!'
+    },
+	'Fail': {
+		pl: 'Porażka'
+	},
+    'Level $[1] Completed!': {
+        pl: 'Poziom $[1] Zakończony!'
+    },
+	'Number of steps bonus x2': {
+		pl: 'Bonus za liczbę kroków x2'
+	},
+	'End position bonus x2': {
+		pl: 'Bonus za pozycję końcową x2'
+	},
+	'Base points $[1]': {
+		pl: 'Bazowa punktacja $[1]'
+	},
+	'You earned $[1] points': {
+		pl: 'Otrzymałeś $[1] punktów'
+	},
+	'Click Space to play next level': {
+		pl: 'Wciśnij Spację aby kontynuować'
+	},
+	'Click R to repeat for better score!': {
+		pl: 'Wciśnij R aby powtórzyć dla lepszego wyniku!'
+	},
+	'Click Space to repeat level $[1]': {
+		pl: 'Wciśnij Spację aby powtórzyć poziom $[1]'
+	},
+	'You overshot $[1] target $[2]!': {
+		pl: 'Zbyt duży wynik $[1] cel $[2]!'
+	},
+	'Repeate (R)': {
+		pl: 'Powtórz (R)'
+	},
+	'Menu (ESC)': {
+		pl: 'Menu (ESC)'
+	},
+	'Next (Space)': {
+		pl: 'Następny (Space)'
+	}
+});
+
+var LabelButton = require('../components/label_button.js');
 
 function Finish() {}
 
@@ -38683,13 +41913,14 @@ Finish.prototype = {
 	
 	},
 	init: function(level, result, target, difficulty) {
-		console.log('GameOver', level, result, target);
 		this.difficulty = difficulty;
 		this.level = level;
 		this.result = result;
 		this.target = target;
 		
 		this.points = 0;
+		
+		localization.setLocale(this.game.lang || 'en');
 	},
 	create: function () {
 		this.createBackground();
@@ -38701,41 +41932,137 @@ Finish.prototype = {
 		this.repeatKey = this.game.input.keyboard.addKey(Phaser.Keyboard.R);
 		this.repeatKey.onDown.add(_.bind(this.repeat, this));
 		
+		this.restartButton = new LabelButton(
+			this.game,
+			this.world.centerX - 5,
+			this.world.height - 10,
+			'btn',
+			localization.translate('Repeate (R)'),
+			_.bind(this.repeat, this),
+			this
+		);
+		this.restartButton.anchor.setTo(1, 1);
+		this.restartButton.width = 200;	
+		this.restartButton.height = 60;
+		this.restartButton.tint = 0xffbb60;
+		this.restartButton.label.setStyle({ font: '28px ' + this.game.theme.font, fill: '#000000' }, true);
+		this.game.world.add(this.restartButton);
+		
+		this.menuButton = new LabelButton(
+			this.game,
+			this.world.centerX + 5,
+			this.world.height - 10,
+			'btn',
+			localization.translate('Menu (ESC)'),
+			_.bind(this.menu, this),
+			this
+		);
+		this.menuButton.anchor.setTo(0, 1);
+		this.menuButton.width = 200;	
+		this.menuButton.height = 60;
+		this.menuButton.tint = 0xffbb60;
+		this.menuButton.label.setStyle({ font: '28px ' + this.game.theme.font, fill: '#000000' }, true);
+		this.game.world.add(this.menuButton);
+		
+		this.game.add.tween(this.menuButton).from({ y: this.menuButton.y + 100, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+		this.game.add.tween(this.restartButton).from({ y: this.restartButton.y + 100, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+		
 		if (this.result.value === this.target.value) {
 			this.points = this.difficulty.growthPoints * this.level;
 			
+			this.restartButton.x = this.world.centerX - 130;
+			this.menuButton.x = this.world.centerX + 130;
+			
+			this.nextButton = new LabelButton(
+				this.game,
+				this.world.centerX,
+				this.world.height - 10,
+				'btn',
+				localization.translate('Next (Space)'),
+				_.bind(this.next, this),
+				this
+			);
+			this.nextButton.anchor.setTo(0.5, 1);
+			this.nextButton.width = 240;	
+			this.nextButton.height = 60;
+			this.nextButton.tint = 0xffbb60;
+			this.nextButton.label.setStyle({ font: '28px ' + this.game.theme.font, fill: '#000000' }, true);
+			this.game.world.add(this.nextButton);
+		
+			this.game.add.tween(this.nextButton).from({ y: this.nextButton.y + 100, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+			
 			if (this.result.steps <= this.target.steps) {
 				this.points *= 2;
-				bonus += '\nStep bonus x2';
+				bonus += '\n' + localization.translate('Number of steps bonus x2');
 				if (this.result.position.x === this.target.position.x && this.result.position.y === this.target.position.y) {
-					bonus += '\nPosition bonus x2';
+					bonus += '\n' + localization.translate('End position bonus x2');
 					this.points *= 2;
-					this.titleText = this.game.add.text(this.game.world.centerX, 100, 'Perfect!', { font: '64px VT323', fill: '#ffaa00', align: 'center'});
+					this.titleText = this.game.add.text(
+						this.game.world.centerX,
+						100,
+						localization.translate('Perfect!'),
+						{ font: '64px ' + this.game.theme.font, fill: '#ffaa00', align: 'center'}
+					);
 				} else {
-					this.titleText = this.game.add.text(this.game.world.centerX, 100, 'Great!', { font: '64px VT323', fill: '#ff6000', align: 'center'});
+					this.titleText = this.game.add.text(
+						this.game.world.centerX,
+						100,
+						localization.translate('Great!'),
+						{ font: '64px ' + this.game.theme.font, fill: '#ff6000', align: 'center'}
+					);
 				}
 			} else {
 				if (this.result.position.x === this.target.position.x && this.result.position.y === this.target.position.y) {
-					bonus += '\nPosition bonus x2';
+					bonus += '\n' + localization.translate('End position bonus x2');
 					this.points *= 2;
-					this.titleText = this.game.add.text(this.game.world.centerX, 100, 'Great!', { font: '64px VT323', fill: '#ff6000', align: 'center'});
+					this.titleText = this.game.add.text(
+						this.game.world.centerX,
+						100,
+						localization.translate('Great!'),
+						{ font: '64px ' + this.game.theme.font, fill: '#ff6000', align: 'center'}
+					);
 				} else {
-					this.titleText = this.game.add.text(this.game.world.centerX, 100, 'Succes!', { font: '64px VT323', fill: '#80ff00', align: 'center'});
+					this.titleText = this.game.add.text(
+						this.game.world.centerX,
+						100,
+						localization.translate('Succes!'),
+						{ font: '64px ' + this.game.theme.font, fill: '#80ff00', align: 'center'}
+					);
 				}
 			}
 			
 			this.titleText.anchor.setTo(0.5, 0.5);
 
-			this.congratsText = this.game.add.text(this.game.world.centerX, 200, 'Level ' + this.level + ' Completed!', { font: '48px VT323', fill: '#ffffff', align: 'center'});
+			this.congratsText = this.game.add.text(
+				this.game.world.centerX,
+				200,
+				localization.translate('Level $[1] Completed!',  this.level),
+				{ font: '48px ' + this.game.theme.font, fill: '#ffffff', align: 'center'}
+			);
 			this.congratsText.anchor.setTo(0.5, 0.5);
 
-			this.bonusText = this.game.add.text(this.game.world.centerX, 300, 'Base points ' + (this.difficulty.growthPoints * this.level) + bonus, { font: '32px VT323', fill: '#ffffff', align: 'center'});
+			this.bonusText = this.game.add.text(
+				this.game.world.centerX,
+				300,
+				localization.translate('Base points $[1]', (this.difficulty.growthPoints * this.level)) + bonus,
+				{ font: '24px ' + this.game.theme.font, fill: '#ffffff', align: 'center'}
+			);
 			this.bonusText.anchor.setTo(0.5, 0.5);
 
-			this.pointsText = this.game.add.text(this.game.world.centerX, 400, 'You earned ' + this.points + ' points', { font: '40px VT323', fill: '#ffffff', align: 'center'});
+			this.pointsText = this.game.add.text(
+				this.game.world.centerX,
+				380,
+				localization.translate('You earned $[1] points', this.points),
+				{ font: '40px ' + this.game.theme.font, fill: '#ffffff', align: 'center'}
+			);
 			this.pointsText.anchor.setTo(0.5, 0.5);
 
-			this.instructionText = this.game.add.text(this.game.world.centerX, 500, 'Click Space to play next level\nClick R to repeat for better score!', { font: '24px VT323', fill: '#dddddd', align: 'center'});
+			this.instructionText = this.game.add.text(
+				this.game.world.centerX,
+				480,
+				localization.translate('Click Space to play next level') + '\n' + localization.translate('Click R to repeat for better score!'),
+				{ font: '24px ' + this.game.theme.font, fill: '#dddddd', align: 'center'}
+			);
 			this.instructionText.anchor.setTo(0.5, 0.5);
 			
 			this.game.add.tween(this.titleText).from({ alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
@@ -38744,13 +42071,28 @@ Finish.prototype = {
 			this.game.add.tween(this.pointsText).from({ alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 1200, 0, false);
 			this.game.add.tween(this.instructionText).from({ alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 1500, 0, false);
 		} else {
-			this.titleText = this.game.add.text(this.game.world.centerX, 100, 'Fail', { font: '64px VT323', fill: '#ff0000', align: 'center'});
+			this.titleText = this.game.add.text(
+				this.game.world.centerX,
+				100,
+				localization.translate('Fail'),
+				{ font: '64px ' + this.game.theme.font, fill: '#ff0000', align: 'center'}
+			);
 			this.titleText.anchor.setTo(0.5, 0.5);
 
-			this.congratsText = this.game.add.text(this.game.world.centerX, 300, 'You overshot ' + this.result.value + ' target ' + this.target.value + '!', { font: '48px VT323', fill: '#ffffff', align: 'center'});
+			this.congratsText = this.game.add.text(
+				this.game.world.centerX,
+				300,
+				localization.translate('You overshot $[1] target $[2]!', this.result.value, this.target.value),
+				{ font: '48px ' + this.game.theme.font, fill: '#ffffff', align: 'center'}
+			);
 			this.congratsText.anchor.setTo(0.5, 0.5);
 
-			this.instructionText = this.game.add.text(this.game.world.centerX, 500, 'Click Space to repeat level ' + this.level, { font: '24px VT323', fill: '#dddddd', align: 'center'});
+			this.instructionText = this.game.add.text(
+				this.game.world.centerX,
+				480,
+				localization.translate('Click Space to repeat level $[1]', this.level),
+				{ font: '24px ' + this.game.theme.font, fill: '#dddddd', align: 'center'}
+			);
 			this.instructionText.anchor.setTo(0.5, 0.5);
 			
 			this.game.add.tween(this.titleText).from({ alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
@@ -38791,6 +42133,9 @@ Finish.prototype = {
 			this.next();
 		}
 	},
+	menu: function () {
+		this.game.state.start('menu');
+	},
 	repeat: function () {
 		this.game.state.start('play', true, false, this.level, this.difficulty);
 	},
@@ -38823,7 +42168,7 @@ Finish.prototype = {
 				
 				gameSave.hash = md5(gameSave.progress);
 				
-				localStorage.setItem('gameSave', JSON.stringify(gameSave));
+				this.game.service.setUserData('gameSave', gameSave);
 			}
 			
 			this.game.state.start('play', true, false, this.level + 1, this.difficulty);
@@ -38835,7 +42180,96 @@ Finish.prototype = {
 
 module.exports = Finish;
 
-},{"js-md5":94,"lodash":96}],143:[function(require,module,exports){
+},{"../components/label_button.js":157,"js-md5":97,"localize":99,"lodash":100}],165:[function(require,module,exports){
+'use strict';
+/* global document */
+var _ = require('lodash');
+var LabelButton = require('../components/label_button.js');
+//var TextInput = require('../components/text_input.js');
+var ServiceApi = require('../gamejolt/api.js');
+
+function GamejoltSetupState() {}
+
+GamejoltSetupState.prototype = {
+	init: function() {
+		ServiceApi.getUserData('save')
+			.then(_.bind(this.onData, this))
+			.catch(_.bind(this.onError, this));
+	},
+	preload: function() {
+
+	},
+	create: function() {
+		var inputStyle = 'box-sizing: border-box; width: 200px; height: 40px; padding: 4px 12px; border: 1px solid #000; background-color: #4af; position: fixed; font: 24px ' + this.game.theme.font;
+		
+		this.sprite = this.game.add.sprite(this.game.world.centerX, 180, 'math-maze-logo');
+		this.sprite.anchor.setTo(0.5, 0.5);
+
+		this.titleLabel = this.game.add.text(this.game.world.centerX, 360, 'Gamejolt Login', { font: '64px ' + this.game.theme.font, fill: '#ffffff', align: 'center'});
+		this.titleLabel.anchor.setTo(0.5, 0.5);
+		
+		this.usernameLabel = this.game.add.text(this.game.world.centerX - 5, 405, 'Username', { font: '28px ' + this.game.theme.font, fill: '#ffffff', align: 'center'});
+		this.usernameLabel.anchor.setTo(1, 0);
+
+		this.usernameInput = document.createElement('input');
+		this.usernameInput.value = ServiceApi.user !== null ? ServiceApi.user.username : '';
+		this.usernameInput.style.cssText = 'left: 405px; top: 400px;' + inputStyle;
+		document.body.appendChild(this.usernameInput);
+		
+		this.tokenLabel = this.game.add.text(this.game.world.centerX - 5, 455, 'Token', { font: '28px ' + this.game.theme.font, fill: '#ffffff', align: 'center'});
+		this.tokenLabel.anchor.setTo(1, 0);
+		
+		this.tokenInput = document.createElement('input');
+		this.tokenInput.value = ServiceApi.user !== null ? ServiceApi.user.token : '';
+		this.tokenInput.style.cssText = 'left: 405px; top: 450px;' + inputStyle;
+		document.body.appendChild(this.tokenInput);
+		
+		this.loginButton = new LabelButton(this.game, this.world.centerX - 5, 500, 'btn', 'Login', _.bind(this.login, this), this, this);
+		this.loginButton.anchor.setTo(1, 0);
+		this.loginButton.width = 200;	
+		this.loginButton.height = 40;
+		this.loginButton.label.setStyle({ font: '24px ' + this.game.theme.font, fill: '#000000', align: 'center' }, true);
+		
+		this.game.world.add(this.loginButton);
+		
+		this.cancelButton = new LabelButton(this.game, this.world.centerX + 5, 500, 'btn', 'Cancel', _.bind(this.cancel, this), this, this);
+		this.cancelButton.anchor.setTo(0, 0);
+		this.cancelButton.width = 200;	
+		this.cancelButton.height = 40;
+		this.cancelButton.label.setStyle({ font: '24px ' + this.game.theme.font, fill: '#000000', align: 'center' }, true);
+		
+		this.game.world.add(this.cancelButton);
+	},
+	login: function() {
+		console.log('on login ');
+		this.game.user = ServiceApi.user;
+	},
+	cancel: function() {
+		console.log('on cancel ');
+		this.game.state.start('menu');
+	},
+	onData: function(response) {
+		console.log('on data ', response, ServiceApi.user);
+		if (ServiceApi.user !== null) {
+			if (!ServiceApi.user.guest) {
+				this.game.state.start('menu');
+			}
+		}
+	},
+	onError: function(response) {
+		console.log('on error ', response);
+	},
+	shutdown: function() {
+		document.body.removeChild(this.usernameInput);
+		delete this.usernameInput;
+		
+		document.body.removeChild(this.tokenInput);
+		delete this.tokenInput;
+	}
+};
+
+module.exports = GamejoltSetupState;
+},{"../components/label_button.js":157,"../gamejolt/api.js":158,"lodash":100}],166:[function(require,module,exports){
 'use strict';
 /* global Phaser, localStorage */
 var md5 = require('js-md5');
@@ -38956,17 +42390,16 @@ Intro.prototype = {
 
 	},
 	create: function() {
-		var style = { font: '64px VT323', fill: '#ffffff', align: 'center'};
 		this.sprite = this.game.add.sprite(this.game.world.centerX, 180, 'math-maze-logo');
 		this.sprite.anchor.setTo(0.5, 0.5);
 
-		this.titleText = this.game.add.text(this.game.world.centerX, 360, 'Math Maze', style);
+		this.titleText = this.game.add.text(this.game.world.centerX, 360, 'Math Maze', { font: '64px ' + this.game.theme.font, fill: '#ffffff', align: 'center'});
 		this.titleText.anchor.setTo(0.5, 0.5);
 
-		this.authorText = this.game.add.text(this.game.world.centerX, 420, 'Game by Xesenix', { font: '36px VT323', fill: '#ffffff', align: 'center'});
+		this.authorText = this.game.add.text(this.game.world.centerX, 420, 'Game by Xesenix', { font: '36px ' + this.game.theme.font, fill: '#ffffff', align: 'center'});
 		this.authorText.anchor.setTo(0.5, 0.5);
 
-		this.instructionsText = this.game.add.text(this.game.world.centerX, 460, 'Click anywhere to play "Math Maze"', { font: '24px VT323', fill: '#dddddd', align: 'center'});
+		this.instructionsText = this.game.add.text(this.game.world.centerX, 460, 'Click anywhere to play "Math Maze"', { font: '24px ' + this.game.theme.font, fill: '#dddddd', align: 'center'});
 		this.instructionsText.anchor.setTo(0.5, 0.5);
 
 		this.game.add.tween(this.sprite).from({ y: -120 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
@@ -38976,24 +42409,117 @@ Intro.prototype = {
 	},
 	update: function() {
 		if (this.game.input.activePointer.justPressed()) {
-			this.game.state.start('menu');
+			this.game.state.start('service');
 		}
 	}
 };
 
 module.exports = Intro;
-},{"js-md5":94,"lodash":96}],144:[function(require,module,exports){
+},{"js-md5":97,"lodash":100}],167:[function(require,module,exports){
+'use strict';
+var _ = require('lodash');
+var LabelButton = require('../components/label_button.js');
+var ServiceApi = require('../kongregate/api.js');
+
+function KongregateSetupState() {}
+
+KongregateSetupState.prototype = {
+	init: function() {
+		ServiceApi.getUserData('gameSave')
+			.then(_.bind(this.onData, this))
+			.catch(_.bind(this.onError, this));
+	},
+	preload: function() {
+	},
+	create: function() {
+		this.sprite = this.game.add.sprite(this.game.world.centerX, 180, 'math-maze-logo');
+		this.sprite.anchor.setTo(0.5, 0.5);
+		
+		//this.asset = this.add.sprite(this.game.world.centerX, 450, 'preloader');
+		//this.asset.width = 600;
+		//this.asset.height = 20;
+		//this.asset.anchor.setTo(0.5, 0.5);
+
+		this.titleLabel = this.game.add.text(this.game.world.centerX, 360, 'Kongregate Login', { font: '64px ' + this.game.theme.font, fill: '#ffffff', align: 'center'});
+		this.titleLabel.anchor.setTo(0.5, 0.5);
+
+		this.infoLabel = this.game.add.text(this.game.world.centerX, 450, 'Please log in to Kongregate,\nif you wish your score would be\nsubmited to Kongregate leadboards.', { font: '20px ' + this.game.theme.font, fill: '#ffffff', align: 'center'});
+		this.infoLabel.anchor.setTo(0.5, 0.5);
+
+		this.loginButton = new LabelButton(this.game, this.world.centerX - 5, 500, 'btn', 'Login to Kongregate', _.bind(this.login, this), this, this);
+		this.loginButton.anchor.setTo(1, 0);
+		this.loginButton.width = 320;	
+		this.loginButton.height = 60;
+		this.loginButton.label.setStyle({ font: '24px ' + this.game.theme.font, fill: '#000000', align: 'center' }, true);
+		
+		this.game.world.add(this.loginButton);
+		
+		this.cancelButton = new LabelButton(this.game, this.world.centerX + 5, 500, 'btn', 'Continue as Guest', _.bind(this.cancel, this), this, this);
+		this.cancelButton.anchor.setTo(0, 0);
+		this.cancelButton.width = 320;	
+		this.cancelButton.height = 60;
+		this.cancelButton.label.setStyle({ font: '24px ' + this.game.theme.font, fill: '#000000', align: 'center' }, true);
+		
+		this.game.world.add(this.cancelButton);
+	},
+	login: function() {
+		console.log('on login ');
+		ServiceApi.authenticate().then(_.bind(this.onData, this));
+	},
+	cancel: function() {
+		console.log('on cancel ');
+		this.game.state.start('menu', true, false);
+	},
+	onData: function(response) {
+		console.log('on data ', response, ServiceApi.user);
+		this.game.state.start('menu', true, false);
+	},
+	onError: function(response) {
+		console.log('on error ', response);
+	}
+};
+
+module.exports = KongregateSetupState;
+},{"../components/label_button.js":157,"../kongregate/api.js":160,"lodash":100}],168:[function(require,module,exports){
 'use strict';
 /* global Phaser, localStorage */
 var _ = require('lodash');
-
-var LabelButton = require('./../components/label_button.js');
+var LabelButton = require('../components/label_button.js');
+var Localize = require('localize');
+var localization = new Localize({
+	'Score: $[1]': {
+        pl: 'Punkty: $[1]'
+    },
+    'Logged in as: ': {
+        pl: 'Zalogowany jako: '
+    },
+    'Easy (numbers 1-3)': {
+        pl: 'Łatwy (cyfry 1-3)'
+    },
+    'Medium (numbers 1-5)': {
+        pl: 'Średni (cyfry 1-5)'
+    },
+	'Hard (numbers 1-7)': {
+		pl: 'Trudny (cyfry 1-7)'
+	},
+	'Insane (numbers 1-9)': {
+		pl: 'Szalony (cyfry 1-9)'
+	},
+	'unlocked level $[1]': {
+		pl: 'odblokowany poziom $[1]'
+	},
+	'Reset progress': {
+		pl: 'Zresetuj postęp'
+	}
+});
 
 function Menu() {}
 
 Menu.prototype = {
 	init: function() {
 		this.menuItemIndex = 0;
+		
+		localization.setLocale(this.game.lang || 'en');
 	},
 	preload: function() {
 
@@ -39016,11 +42542,11 @@ Menu.prototype = {
 		this.insaneKey.onDown.add(_.bind(function() { this.game.state.start('play', true, false, this.game.mode.insane.unlocked, this.game.mode.insane);}, this));
 	},
 	createMenuButton: function(label, callback) {
-		var button = new LabelButton(this.game, this.world.centerX, 200 + 80 * (this.menuItemIndex++), 'btn', label, callback, this, this);
+		var button = new LabelButton(this.game, this.world.centerX, 210 + 80 * (this.menuItemIndex++), 'btn', label, callback, this, this);
 		button.anchor.setTo(0.5, 0.5);
 		button.width = 360;	
-		button.height = 72;
-		button.label.setStyle({ font: '24px VT323', fill: '#000000', align: 'center' }, true);
+		button.height = 70;
+		button.label.setStyle({ font: '20px ' + this.game.theme.font, fill: '#000000', align: 'center' }, true);
 		
 		this.game.world.add(button);
 		
@@ -39049,53 +42575,79 @@ Menu.prototype = {
 	},
 	createMenu: function() {
 		this.easyButton = this.createMenuButton(
-			'Easy (numbers 1-3)\nunlocked level ' + this.game.mode.easy.unlocked, 
+			localization.translate('Easy (numbers 1-3)') + '\n' + localization.translate('unlocked level $[1]', this.game.mode.easy.unlocked), 
 			_.bind(function() { this.game.state.start('play', true, false, this.game.mode.easy.unlocked, this.game.mode.easy);}, this)
 		);
 		this.easyButton.tint = 0xffbb60;
 		
 		this.mediumButton = this.createMenuButton(
-			'Medium (numbers 1-5)\nunlocked level ' + this.game.mode.medium.unlocked,
+			localization.translate('Medium (numbers 1-5)') + '\n' + localization.translate('unlocked level $[1]', this.game.mode.medium.unlocked),
 			_.bind(function() {this.game.state.start('play', true, false, this.game.mode.medium.unlocked, this.game.mode.medium);}, this)
 		);
 		this.mediumButton.tint = 0xffbb60;
 		
 		this.hardButton = this.createMenuButton(
-			'Hard (numbers 1-7)\nunlocked level ' + this.game.mode.hard.unlocked,
+			localization.translate('Hard (numbers 1-7)') + '\n' + localization.translate('unlocked level $[1]', this.game.mode.hard.unlocked),
 			_.bind(function() {this.game.state.start('play', true, false, this.game.mode.hard.unlocked, this.game.mode.hard);}, this)
 		);
 		this.hardButton.tint = 0xffbb60;
 		
 		this.insaneButton = this.createMenuButton(
-			'Insane (numbers 1-9)\nunlocked level ' + this.game.mode.insane.unlocked,
+			localization.translate('Insane (numbers 1-9)') + '\n' + localization.translate('unlocked level $[1]', this.game.mode.insane.unlocked),
 			_.bind(function() {this.game.state.start('play', true, false, this.game.mode.insane.unlocked, this.game.mode.insane);}, this)
 		);
 		this.insaneButton.tint = 0xffbb60;
 		
-		this.resetButton = this.createMenuButton('Reset progress ', _.bind(this.resetProgress, this));
+		this.resetButton = this.createMenuButton(localization.translate('Reset progress'), _.bind(this.resetProgress, this));
 		this.resetButton.tint = 0xff4040;
+		this.resetButton.y += 20;
 		
-		this.game.add.tween(this.easyButton).from({ x: -320}, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
-		this.game.add.tween(this.mediumButton).from({ x: -320}, 500, Phaser.Easing.Linear.NONE, true, 100, 0, false);
-		this.game.add.tween(this.hardButton).from({ x: -320}, 500, Phaser.Easing.Linear.NONE, true, 200, 0, false);
-		this.game.add.tween(this.insaneButton).from({ x: -320}, 500, Phaser.Easing.Linear.NONE, true, 300, 0, false);
-		this.game.add.tween(this.resetButton).from({ y: this.game.world.height + 40 }, 500, Phaser.Easing.Linear.NONE, true, 800, 0, false);
+		this.game.add.tween(this.easyButton)
+			.from({ x: -320}, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+		this.game.add.tween(this.mediumButton)
+			.from({ x: -320}, 500, Phaser.Easing.Linear.NONE, true, 100, 0, false);
+		this.game.add.tween(this.hardButton)
+			.from({ x: -320}, 500, Phaser.Easing.Linear.NONE, true, 200, 0, false);
+		this.game.add.tween(this.insaneButton)
+			.from({ x: -320}, 500, Phaser.Easing.Linear.NONE, true, 300, 0, false);
+		this.game.add.tween(this.resetButton)
+			.from({ y: this.game.world.height + 40 }, 500, Phaser.Easing.Linear.NONE, true, 800, 0, false);
 	},
 	createInterface: function() {
 		this.createBackground();
 		this.createMenu();
 		
-		this.titleLabel = this.game.add.text(this.game.world.centerX, 40, 'Math Maze', { font: '64px VT323', fill: '#ffffff', align: 'center'});
+		this.titleLabel = this.game.add.text(
+			this.game.world.centerX, 
+			40,
+			'Math Maze',
+			{ font: '64px ' + this.game.theme.font, fill: '#ffffff', align: 'center'}
+		);
 		this.titleLabel.anchor.setTo(0.5, 0.5);
 
-		this.scoreLabel = this.game.add.text(this.game.world.centerX, 100, 'Score: ' + _.sum(_.map(this.game.mode, 'points')), { font: '48px VT323', fill: '#ffffff', align: 'center'});
+		this.scoreLabel = this.game.add.text(
+			this.game.world.centerX, 
+			100, 
+			localization.translate('Score: $[1]', _.sum(_.map(this.game.mode, 'points'))),
+			{ font: '40px ' + this.game.theme.font, fill: '#ffffff', align: 'center'}
+		);
 		this.scoreLabel.anchor.setTo(0.5, 0.5);
+
+		if (typeof(this.game.service.user) !== 'undefined' && this.game.service.user !== null) {
+			this.loginLabel = this.game.add.text(
+				this.game.world.centerX, 
+				150, 
+				localization.translate('Logged in as: ') + this.game.service.user.username,
+				{ font: '24px ' + this.game.theme.font, fill: '#ffffff', align: 'center'}
+			);
+			this.loginLabel.anchor.setTo(0.5, 0.5);
+			this.game.add.tween(this.loginLabel).from({ alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 1500, 0, false);
+		}
 		
 		this.game.add.tween(this.titleLabel).from({ alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 800, 0, false);
 		this.game.add.tween(this.scoreLabel).from({ alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 1200, 0, false);
 	},
 	resetProgress: function() {
-		console.log('resetProgress');
 		this.game.mode.easy.unlocked = 1;
 		this.game.mode.easy.points = 0;
 		this.game.mode.medium.unlocked = 1;
@@ -39105,18 +42657,27 @@ Menu.prototype = {
 		this.game.mode.insane.unlocked = 1;
 		this.game.mode.insane.points = 0;
 		
-		this.easyButton.label.text = 'Easy (numbers 1-3)\nunlocked level ' + this.game.mode.easy.unlocked;
-		this.mediumButton.label.text = 'Medium (numbers 1-5)\nunlocked level ' + this.game.mode.medium.unlocked;
-		this.hardButton.label.text = 'Hard (numbers 1-7)\nunlocked level ' + this.game.mode.hard.unlocked;
-		this.insaneButton.label.text = 'Insane (numbers 1-9)\nunlocked level ' + this.game.mode.insane.unlocked;
+		this.easyButton.label.text = localization.translate('Easy (numbers 1-3)') +
+			'\n' + localization.translate('unlocked level $[1]', this.game.mode.easy.unlocked);
+		this.mediumButton.label.text = localization.translate('Medium (numbers 1-5)') +
+			'\n' + localization.translate('unlocked level $[1]', this.game.mode.medium.unlocked);
+		this.hardButton.label.text = localization.translate('Hard (numbers 1-7)') +
+			'\n' + localization.translate('unlocked level $[1]', this.game.mode.hard.unlocked);
+		this.insaneButton.label.text = localization.translate('Insane (numbers 1-9)') +
+			'\n' + localization.translate('unlocked level $[1]', this.game.mode.insane.unlocked);
 		
-		this.scoreLabel.text = 'Score: ' + _.sum(_.map(this.game.mode, 'points'));
+		this.scoreLabel.text = localization.translate('Score: $[1]', _.sum(_.map(this.game.mode, 'points')));
 		
-		this.game.add.tween(this.scoreLabel).from({ x: this.scoreLabel.x - 10}, 100, Phaser.Easing.Linear.InOut, true, 0, 1, true);
-		this.game.add.tween(this.easyButton).to({ x: this.easyButton.x - 10}, 100, Phaser.Easing.Linear.InOut, true, 50, 1, true);
-		this.game.add.tween(this.mediumButton).to({ x: this.mediumButton.x - 10}, 100, Phaser.Easing.Linear.InOut, true, 100, 1, true);
-		this.game.add.tween(this.hardButton).to({ x: this.hardButton.x - 10}, 100, Phaser.Easing.Linear.InOut, true, 150, 1, true);
-		this.game.add.tween(this.insaneButton).to({ x: this.insaneButton.x - 10}, 100, Phaser.Easing.Linear.InOut, true, 200, 1, true);
+		this.game.add.tween(this.scoreLabel)
+			.from({ x: this.scoreLabel.x - 10}, 100, Phaser.Easing.Linear.InOut, true, 0, 1, true);
+		this.game.add.tween(this.easyButton)
+			.to({ x: this.easyButton.x - 10}, 100, Phaser.Easing.Linear.InOut, true, 50, 1, true);
+		this.game.add.tween(this.mediumButton)
+			.to({ x: this.mediumButton.x - 10}, 100, Phaser.Easing.Linear.InOut, true, 100, 1, true);
+		this.game.add.tween(this.hardButton)
+			.to({ x: this.hardButton.x - 10}, 100, Phaser.Easing.Linear.InOut, true, 150, 1, true);
+		this.game.add.tween(this.insaneButton)
+			.to({ x: this.insaneButton.x - 10}, 100, Phaser.Easing.Linear.InOut, true, 200, 1, true);
 		
 		localStorage.setItem('gameSave', JSON.stringify({}));
 	},
@@ -39127,48 +42688,108 @@ Menu.prototype = {
 
 module.exports = Menu;
 
-},{"./../components/label_button.js":138,"lodash":96}],145:[function(require,module,exports){
+},{"../components/label_button.js":157,"localize":99,"lodash":100}],169:[function(require,module,exports){
 'use strict';
 /* global Phaser */
 var _ = require('lodash');
-
-var Board = require('./../components/board.js');
-var Bot = require('./../mathmaze/bot.js');
-var LabelButton = require('./../components/label_button.js');
-//var UI = require('./../factory/ui.js');
+var Board = require('../components/board.js');
+var Bot = require('../mathmaze/bot.js');
+var LabelButton = require('../components/label_button.js');
+var Localize = require('localize');
+var localization = new Localize({
+    'Easy level: $[1]': {
+        pl: 'Poziom łatwy: $[1]'
+    },
+    'Medium level: $[1]': {
+        pl: 'Poziom średni: $[1]'
+    },
+    'Hard level: $[1]': {
+        pl: 'Poziom trudny: $[1]'
+    },
+    'Insane level: $[1]': {
+        pl: 'Poziom szalony: $[1]'
+    },
+	'Total score: $[1]': {
+		pl: 'Suma punktów: $[1]'
+	},
+	'Current value: $[1]': {
+		pl: 'Obecna wartość: $[1]'
+	},
+	'Target value: $[1]': {
+		pl: 'Oczekiwana wartość: $[1]'
+	},
+	'Steps: $[1]': {
+		pl: 'Wykonanych kroków: $[1]'	
+	},
+	'Steps for bonus: $[1] or less': {
+		pl: 'Kroki do bonusu: $[1] lub mniej'
+	},
+	'Restart (R)': {
+		pl: 'Restartuj (R)'
+	},
+	'Menu (ESC)': {
+		pl: 'Menu (ESC)'
+	},
+	'Help (H)': {
+		pl: 'Pomoc (H)'
+	}
+});
 
 function Play() {}
 
 Play.prototype = {
+	tutorialIndex: -1,
+	tutorialStep: [
+		'Your goal is to make current value equal to target value.\n',
+		'Use eighter arrows, a/s/d/w or mouse to change you position.',
+		'When you move horizontal (left/right)\nyou add value in squere you moved to your current collected value.',
+		'When you move vertical (top/down)\n you multiply your current collected value by amount in tile you moved to.',
+		'You get points x2 bonus for finishing in less then required amount of steps.',
+		'You can get additional x2 bonus for finishing on blue squere.\nIt works only if blue squer is your last step!'
+	],
 	init: function(level, difficulty) {
-		console.log('Play', level, difficulty);
+		// game state setup
 		this.level = level || 1;
-		
 		this.difficulty = difficulty;
-		
 		this.levelConfig = _.extend({
 			level: this.level,
 			steps: Math.floor(this.level / 3) + 3
 		}, this.difficulty.config);
+		this.position = {
+			x: 0,
+			y: 0
+		};
+		this.steps = 0;
+
+		this.board = new Board(this.levelConfig);
+
+		var bot = new Bot(this.levelConfig.vertical, this.levelConfig.horizontal);
+
+		this.target = bot.traverse(
+			this.levelConfig.steps,
+			this.levelConfig.moves[this.level % this.levelConfig.moves.length],
+			this.board
+		);
 		
+		// display setup
 		this.tileBaseSize = 128;
 		this.tileSize = 112;
 		this.boardWidth = this.levelConfig.sizeX * this.tileSize;
 		this.offsetX = (this.world.width - this.boardWidth) / 2;
 		this.offsetY = 140;
 		
+		localization.setLocale(this.game.lang || 'en');
+	},
+	reset: function () {
+		this.position.x = 0;
+		this.position.y = 0;
 		this.steps = 0;
-
-		this.position = {
-			x: 0,
-			y: 0
-		};
-
-		this.board = new Board(this.levelConfig);
-
-		var bot = new Bot(this.levelConfig.vertical, this.levelConfig.horizontal);
-
-		this.target = bot.traverse(this.levelConfig.steps, this.levelConfig.moves[this.level % this.levelConfig.moves.length], this.board);
+		this.enabled = true;
+		this.result = this.node[this.position.x][this.position.y].value;
+		
+		this.stepsLabel.text = localization.translate('Steps: $[1]', this.steps);
+		
+		this.updateView();
 	},
 	create: function () {
 		this.setupKeyboard();
@@ -39182,13 +42803,16 @@ Play.prototype = {
 		this.resetKey = this.game.input.keyboard.addKey(Phaser.Keyboard.R);
 		this.resetKey.onDown.add(_.bind(this.reset, this));
 		
+		this.helpKey = this.game.input.keyboard.addKey(Phaser.Keyboard.H);
+		this.helpKey.onDown.add(_.bind(this.tutorial, this));
+		
 		this.menuKey = this.game.input.keyboard.addKey(Phaser.Keyboard.ESC);
 		this.menuKey.onDown.add(_.bind(this.menu, this));
 
 		this.game.input.keyboard.onUpCallback = _.bind(this.onKeyboard, this);
 	},
 	createBoard: function() {
-		var x, y, tile, node, scale = this.tileSize / this.tileBaseSize;
+		var x, y, tile, node;//, scale = this.tileSize / this.tileBaseSize;
 		
 		this.node = [];
 		this.boardGroup = this.game.add.group();
@@ -39202,17 +42826,24 @@ Play.prototype = {
 					value: this.board.getValue(x, y)
 				};
 
-				tile = this.game.add.sprite(x * this.tileSize, y * this.tileSize, 'tile-' + node.value);
-				tile.scale.setTo(scale, scale);
-				tile.inputEnabled = true;
-				tile.events.onInputDown.add(_.bind(this.moveTo, this, x, y));
+				tile = new LabelButton(
+					this.game,
+					x * this.tileSize,
+					y * this.tileSize,
+					'btn', node.value,
+					_.bind(this.moveTo, this, x, y)
+				);
+				tile.width = this.tileSize;
+				tile.height = this.tileSize;
+				tile.label.setStyle({ font: '64px ' + this.game.theme.font, fill: '#444444' }, true);
 				
 				node.tile = tile;
 				this.node[x][y] = node;
 				
 				this.boardGroup.add(tile);
 				
-				this.game.add.tween(tile).from({ x: x * this.tileSize + 100, alpha: 0 }, 400, Phaser.Easing.Linear.NONE, true, (x * this.levelConfig.sizeY + y) * 50, 0, false);
+				this.game.add.tween(tile)
+					.from({ x: x * this.tileSize + 100, alpha: 0 }, 400, Phaser.Easing.Linear.NONE, true, (x * this.levelConfig.sizeY + y) * 50, 0, false);
 			}
 		}
 	},
@@ -39237,7 +42868,8 @@ Play.prototype = {
 		this.topbar.drawRect(0, -40, this.game.world.width, 80);
 		this.topbar.endFill();
 		
-		this.game.add.tween(this.topbar).from({ y: this.topbar.y + 40 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+		this.game.add.tween(this.topbar)
+			.from({ y: this.topbar.y + 40 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
 	},
 	draw: {
 		plus: function(graphics, x, y, size) {
@@ -39277,82 +42909,136 @@ Play.prototype = {
 	createPointer: function() {
 		this.pointer = this.game.add.graphics(0, 0);
 		this.redrawPointer();
-		this.game.add.tween(this.pointer).from({ alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, this.levelConfig.sizeX * this.levelConfig.sizeY * 100, 0, false);
+		this.game.add.tween(this.pointer)
+			.from({ alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, this.levelConfig.sizeX * this.levelConfig.sizeY * 100, 0, false);
 	},
 	createInterface: function() {
 		this.createBackground();
 		this.createBoard();
 		this.createPointer();
 
-		this.levelLabel = this.game.add.text(20, 10, this.levelConfig.label + ' level: ' + this.level, { font: '24px VT323', fill: '#ffffff' });
+		this.levelLabel = this.game.add.text(
+			20,
+			10,
+			localization.translate(this.levelConfig.label + ' level: $[1]', this.level),
+			{ font: '24px ' + this.game.theme.font, fill: '#ffffff' }
+		);
 		this.levelLabel.anchor.setTo(0, 0);
 		//this.levelLabel.setShadow(3, 3, 'rgba(0,0,0,0.5)', 2);
 
-		this.scoreLabel = this.game.add.text(this.game.world.width - 20, 10, 'Total score: ' + _.sum(_.map(this.game.mode, 'points')), { font: '24px VT323', fill: '#ffffff' });
+		this.scoreLabel = this.game.add.text(
+			this.game.world.width - 20,
+			10,
+			localization.translate('Total score: $[1]', _.sum(_.map(this.game.mode, 'points'))),
+			{ font: '24px ' + this.game.theme.font, fill: '#ffffff' }
+		);
 		this.scoreLabel.anchor.setTo(1, 0);
 		//this.scoreLabel.setShadow(3, 3, 'rgba(0,0,0,0.5)', 2);
 
-		this.resultLabel = this.game.add.text(20, 90, 'Current value', { font: '36px VT323', fill: '#ffffff' });
+		this.resultLabel = this.game.add.text(
+			20,
+			85,
+			localization.translate('Current value: $[1]', 0),
+			{ font: '28px ' + this.game.theme.font, fill: '#ffffff' }
+		);
 		this.resultLabel.anchor.setTo(0, 1);
 		this.resultLabel.setShadow(3, 3, 'rgba(0,0,0,0.5)', 2);
 
-		this.stepsLabel = this.game.add.text(20, 105, 'Steps', { font: '20px VT323', fill: '#ffffff' });
+		this.stepsLabel = this.game.add.text(
+			20,
+			105,
+			localization.translate('Steps: $[1]', 0),
+			{ font: '20px ' + this.game.theme.font, fill: '#ffffff' }
+		);
 		this.stepsLabel.anchor.setTo(0, 0.5);
 		this.stepsLabel.setShadow(3, 3, 'rgba(0,0,0,0.5)', 2);
 		
-		this.targetLabel = this.game.add.text(this.game.world.width - 20, 90, 'Target value: ' + this.target.value, { font: '36px VT323', fill: '#ffffff' });
+		this.targetLabel = this.game.add.text(
+			this.game.world.width - 20,
+			85,
+			localization.translate('Target value: $[1]', this.target.value),
+			{ font: '28px ' + this.game.theme.font, fill: '#ffffff' }
+		);
 		this.targetLabel.anchor.setTo(1, 1);
 		this.targetLabel.setShadow(3, 3, 'rgba(0,0,0,0.5)', 2);
 		
-		this.bonusStepsLabel = this.game.add.text(this.game.world.width - 20, 105, 'Steps for bonus: ' + this.target.steps + ' or less', { font: '20px VT323', fill: '#ffffff' });
+		this.bonusStepsLabel = this.game.add.text(
+			this.game.world.width - 20,
+			105,
+			localization.translate('Steps for bonus: $[1] or less', this.target.steps),
+			{ font: '20px ' + this.game.theme.font, fill: '#ffffff' }
+		);
 		this.bonusStepsLabel.anchor.setTo(1, 0.5);
 		this.bonusStepsLabel.setShadow(3, 3, 'rgba(0,0,0,0.5)', 2);
 		
-		this.restartButton = new LabelButton(this.game, this.world.centerX - 5, this.world.height - 10, 'btn', 'Restart (R)', _.bind(this.reset, this), this);
+		this.restartButton = new LabelButton(
+			this.game,
+			this.world.centerX - 110,
+			this.world.height - 10,
+			'btn',
+			localization.translate('Restart (R)'),
+			_.bind(this.reset, this)
+		);
 		this.restartButton.anchor.setTo(1, 1);
 		this.restartButton.width = 200;	
 		this.restartButton.height = 60;
 		this.restartButton.tint = 0xffbb60;
-		this.restartButton.label.setStyle({ font: '32px VT323', fill: '#000000' }, true);
+		this.restartButton.label.setStyle({ font: '28px ' + this.game.theme.font, fill: '#000000' }, true);
 		this.game.world.add(this.restartButton);
 		
-		this.menuButton = new LabelButton(this.game, this.world.centerX + 5, this.world.height - 10, 'btn', 'Menu (ESC)', _.bind(this.menu, this), this);
+		this.helpButton = new LabelButton(
+			this.game,
+			this.world.centerX,
+			this.world.height - 10,
+			'btn', 
+			localization.translate('Help (H)'),
+			_.bind(this.tutorial, this)
+		);
+		this.helpButton.anchor.setTo(0.5, 1);
+		this.helpButton.width = 200;	
+		this.helpButton.height = 60;
+		this.helpButton.tint = 0xffbb60;
+		this.helpButton.label.setStyle({ font: '28px ' + this.game.theme.font, fill: '#000000' }, true);
+		this.game.world.add(this.helpButton);
+		
+		this.menuButton = new LabelButton(
+			this.game,
+			this.world.centerX + 110,
+			this.world.height - 10,
+			'btn', 
+			localization.translate('Menu (ESC)'),
+			_.bind(this.menu, this)
+		);
 		this.menuButton.anchor.setTo(0, 1);
 		this.menuButton.width = 200;	
 		this.menuButton.height = 60;
 		this.menuButton.tint = 0xffbb60;
-		this.menuButton.label.setStyle({ font: '32px VT323', fill: '#000000' }, true);
+		this.menuButton.label.setStyle({ font: '28px ' + this.game.theme.font, fill: '#000000' }, true);
 		this.game.world.add(this.menuButton);
 		
-		this.game.add.tween(this.levelLabel).from({ x: this.levelLabel.x - 100, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 500, 0, false);
-		this.game.add.tween(this.resultLabel).from({ x: this.resultLabel.x - 100, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 500, 0, false);
-		this.game.add.tween(this.stepsLabel).from({ x: this.stepsLabel.x - 100, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 500, 0, false);
+		this.game.add.tween(this.levelLabel)
+			.from({ x: this.levelLabel.x - 100, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 500, 0, false);
+		this.game.add.tween(this.resultLabel)
+			.from({ x: this.resultLabel.x - 100, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 500, 0, false);
+		this.game.add.tween(this.stepsLabel)
+			.from({ x: this.stepsLabel.x - 100, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 500, 0, false);
 		
-		this.game.add.tween(this.scoreLabel).from({ x: this.scoreLabel.x + 100, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 500, 0, false);
-		this.game.add.tween(this.targetLabel).from({ x: this.targetLabel.x + 100, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 500, 0, false);
-		this.game.add.tween(this.bonusStepsLabel).from({ x: this.bonusStepsLabel.x + 100, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 500, 0, false);
+		this.game.add.tween(this.scoreLabel)
+			.from({ x: this.scoreLabel.x + 100, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 500, 0, false);
+		this.game.add.tween(this.targetLabel)
+			.from({ x: this.targetLabel.x + 100, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 500, 0, false);
+		this.game.add.tween(this.bonusStepsLabel)
+			.from({ x: this.bonusStepsLabel.x + 100, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 500, 0, false);
 		
-		this.game.add.tween(this.menuButton).from({ y: this.menuButton.y + 100, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 500, 0, false);
-		this.game.add.tween(this.restartButton).from({ y: this.restartButton.y + 100, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 500, 0, false);
+		this.game.add.tween(this.menuButton)
+			.from({ y: this.menuButton.y + 100, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 500, 0, false);
+		this.game.add.tween(this.helpButton)
+			.from({ y: this.helpButton.y + 100, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 500, 0, false);
+		this.game.add.tween(this.restartButton)
+			.from({ y: this.restartButton.y + 100, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 500, 0, false);
 
 		//this.infoLabel = this.game.add.text(this.game.world.width - 10, this.game.world.height, 'Press R to restart', style);
 		//this.infoLabel.anchor.setTo(1, 1);
-	},
-	reset: function () {
-		this.position = {
-			x: 0,
-			y: 0
-		};
-		this.steps = 0;
-		this.enabled = true;
-		this.result = this.node[this.position.x][this.position.y].value;
-		
-		this.stepsLabel.text = 'Steps: 0';
-		
-		this.updateView();
-	},
-	menu: function() {
-		this.game.state.start('menu');
 	},
 	update: function () {
 		/*if (this.game.input.activePointer.withinGame) {
@@ -39424,43 +43110,406 @@ Play.prototype = {
 
 		this.pointer.position.setTo(this.offsetX + this.position.x * this.tileSize, this.offsetY + this.position.y * this.tileSize);
 
-		this.resultLabel.text = 'Current value: ' + this.result;
-		this.stepsLabel.text = 'Steps: ' + this.steps;
+		this.resultLabel.text = localization.translate('Current value: $[1]', this.result);
+		this.stepsLabel.text = localization.translate('Steps: $[1]', this.steps);
 		
 		this.redrawPointer();
 	},
+	menu: function() {
+		this.game.state.start('menu');
+	},
+	createTutorial: function() {
+		console.log('createTutorial', this.tutorialIndex);
+		if (this.tutorialIndex === -1) {
+			this.tutorialIndex = 0;
+			this.tutorialGroup = this.game.add.group();
+			
+			var background = this.game.add.graphics(0, 0);
+			background.beginFill(0x006030);
+			background.drawRect(0, 0, this.game.world.width, 160);
+			background.endFill();
+			
+			this.tutorialLabel = this.game.add.text(
+				this.game.world.centerX,
+				20,
+				this.tutorialStep[this.tutorialIndex],
+				{ font: '20px ' + this.game.theme.font, fill: '#ffffff', align: 'center' }
+			);
+			this.tutorialLabel.anchor.setTo(0.5, 0);
+			
+			this.helpNextButton = new LabelButton(
+				this.game,
+				this.world.centerX + 105,
+				150,
+				'btn', 
+				localization.translate('Next'),
+				_.bind(this.tutorialStepChange, this, 1)
+			);
+			this.helpNextButton.anchor.setTo(0, 1);
+			this.helpNextButton.width = 200;	
+			this.helpNextButton.height = 60;
+			this.helpNextButton.tint = 0xffbb60;
+			this.helpNextButton.label.setStyle({ font: '28px ' + this.game.theme.font, fill: '#000000' }, true);
+			
+			this.helpBackButton = new LabelButton(
+				this.game,
+				this.world.centerX,
+				150,
+				'btn', 
+				localization.translate('Back'),
+				_.bind(this.tutorial, this, -1)
+			);
+			this.helpBackButton.anchor.setTo(0.5, 1);
+			this.helpBackButton.width = 200;	
+			this.helpBackButton.height = 60;
+			this.helpBackButton.tint = 0xffbb60;
+			this.helpBackButton.label.setStyle({ font: '28px ' + this.game.theme.font, fill: '#000000' }, true);
+			
+			this.helpPrevButton = new LabelButton(
+				this.game,
+				this.world.centerX - 105,
+				150,
+				'btn', 
+				localization.translate('Previous'),
+				_.bind(this.tutorialStepChange, this, -1)
+			);
+			this.helpPrevButton.anchor.setTo(1, 1);
+			this.helpPrevButton.width = 200;	
+			this.helpPrevButton.height = 60;
+			this.helpPrevButton.tint = 0xffbb60;
+			this.helpPrevButton.label.setStyle({ font: '28px ' + this.game.theme.font, fill: '#000000' }, true);
+			
+			this.tutorialGroup.add(background);
+			this.tutorialGroup.add(this.tutorialLabel);
+			this.tutorialGroup.add(this.helpNextButton);
+			this.tutorialGroup.add(this.helpBackButton);
+			this.tutorialGroup.add(this.helpPrevButton);
+			this.tutorialGroup.y = this.world.height - 160;
+			
+			this.game.add.tween(background)
+				.from({ x: -this.game.world.width, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+			this.game.add.tween(this.tutorialLabel)
+				.from({ alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 500, 0, false);
+			this.game.add.tween(this.helpNextButton)
+				.from({ alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 500, 0, false);
+			this.game.add.tween(this.helpBackButton)
+				.from({ alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 500, 0, false);
+			this.game.add.tween(this.helpPrevButton)
+				.from({ alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 500, 0, false);
+			
+			this.tutorialStepChange(0);
+		} else {
+			this.tutorialClose();
+		}
+	},
+	tutorialClose: function() {
+		this.tutorialIndex = -1;
+		this.tutorialStepChange(0);
+		
+		if (typeof(this.tutorialGroup) !== 'undefined' && this.tutorialGroup != null) {
+			this.tutorialGroup.destroy();
+		}
+		
+		this.tutorialLabel = null;
+		this.helpNextButton = null;
+		this.helpPrevButton = null;
+		this.tutorialGroup = null;
+	},
+	tutorial: function() {
+		this.createTutorial();
+		//this.tutorialGroup
+	},
+	tutorialStepChange: function(change) {
+		if (this.tutorialIndex + change >= 0 && this.tutorialIndex + change < this.tutorialStep.length) {
+			this.tutorialIndex += change;
+			this.tutorialLabel.text = this.tutorialStep[this.tutorialIndex];
+		} else if (change !== 0) {
+			return;
+		}
+		
+		this.game.tweens.remove(this.levelLabelTween);
+		this.game.tweens.remove(this.resultLabelTween);
+		this.game.tweens.remove(this.stepsLabelTween);
+		this.game.tweens.remove(this.scoreLabelTween);
+		this.game.tweens.remove(this.targetLabelTween);
+		this.game.tweens.remove(this.bonusStepsLabelTween);
+		this.game.tweens.remove(this.targetTileTween);
+		this.game.tweens.remove(this.leftTileTween);
+		this.game.tweens.remove(this.rightTileTween);
+		this.game.tweens.remove(this.topTileTween);
+		this.game.tweens.remove(this.bottomTileTween);
+		
+		if (this.tutorialIndex === 0) {
+			this.helpPrevButton.tint = 0xaaaaaa;
+		} else {
+			this.helpPrevButton.tint = 0xffbb60;
+		}
+		
+		if (this.tutorialIndex === this.tutorialStep.length - 1) {
+			this.helpNextButton.tint = 0xaaaaaa;
+		} else {
+			this.helpNextButton.tint = 0xffbb60;
+		}
+		
+		var targetTile = this.node[this.target.position.x][this.target.position.y].tile;
+		
+		var leftTile = this.position.x > 0 ? this.node[this.position.x - 1][this.position.y].tile : { y: 0 };
+		var rightTile = this.position.x < this.levelConfig.sizeX - 1 ? this.node[this.position.x + 1][this.position.y].tile : { y: 0};
+		
+		var topTile = this.position.y > 0 ? this.node[this.position.x][this.position.y - 1].tile : { y: 0 };
+		var bottomTile = this.position.y < this.levelConfig.sizeY - 1 ? this.node[this.position.x][this.position.y + 1].tile : { y: 0};
+		
+		this.levelLabel.x = 20;
+		this.levelLabel.alpha = 1;
+		
+		this.resultLabel.x = 20;
+		this.resultLabel.alpha = 1;
+		
+		this.stepsLabel.x = 20;
+		this.stepsLabel.alpha = 1;
+		
+		this.scoreLabelx = this.game.world.width - 20;
+		this.scoreLabelalpha = 1;
+		
+		this.targetLabel.x = this.game.world.width - 20;
+		this.targetLabel.alpha = 1;
+		
+		this.bonusStepsLabel.x = this.game.world.width - 20;
+		this.bonusStepsLabel.alpha = 1;
+
+		targetTile.y = this.target.position.y * this.tileSize;
+		
+		leftTile.y = this.position.y * this.tileSize;
+		rightTile.y = this.position.y * this.tileSize;
+		topTile.y = (this.position.y - 1) * this.tileSize;
+		bottomTile.y = (this.position.y + 1) * this.tileSize;
+		
+		switch (this.tutorialIndex) {
+			case 0:
+				this.levelLabelTween = this.game.add.tween(this.levelLabel)
+					.to({ x: -80, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				this.resultLabelTween = this.game.add.tween(this.resultLabel)
+					.to({ x: 10, alpha: 1 }, 500, Phaser.Easing.Linear.NONE, true, 0, 50, true);
+				this.stepsLabelTween = this.game.add.tween(this.stepsLabel)
+					.to({ x: -80, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+
+				this.scoreLabelTween = this.game.add.tween(this.scoreLabel)
+					.to({ x: this.game.world.width + 80, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				this.targetLabelTween = this.game.add.tween(this.targetLabel)
+					.to({ x: this.game.world.width - 10 }, 500, Phaser.Easing.Linear.NONE, true, 0, 50, true);
+				this.bonusStepsLabelTween = this.game.add.tween(this.bonusStepsLabel)
+					.to({ x: this.game.world.width + 80, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				
+				this.targetTileTween = this.game.add.tween(targetTile)
+					.to({ y: this.target.position.y * this.tileSize }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				
+				this.leftTileTween = this.game.add.tween(leftTile)
+					.to({ y: this.position.y * this.tileSize }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				this.rightTileTween = this.game.add.tween(rightTile)
+					.to({ y: this.position.y * this.tileSize }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				this.topTileTween = this.game.add.tween(topTile)
+					.to({ y: (this.position.y - 1) * this.tileSize }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				this.bottomTileTween = this.game.add.tween(bottomTile)
+					.to({ y: (this.position.y + 1) * this.tileSize }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				break;
+			case 1:
+				this.levelLabelTween = this.game.add.tween(this.levelLabel)
+					.to({ x: 20, alpha: 1 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				this.resultLabelTween = this.game.add.tween(this.resultLabel)
+					.to({ x: 10, alpha: 1 }, 500, Phaser.Easing.Linear.NONE, true, 0, 50, true);
+				this.stepsLabelTween = this.game.add.tween(this.stepsLabel)
+					.to({ x: 20, alpha: 1 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+
+				this.scoreLabelTween = this.game.add.tween(this.scoreLabel)
+					.to({ x: this.game.world.width - 20, alpha: 1 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				this.targetLabelTween = this.game.add.tween(this.targetLabel)
+					.to({ x: this.game.world.width - 20, alpha: 1 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				this.bonusStepsLabelTween = this.game.add.tween(this.bonusStepsLabel)
+					.to({ x: this.game.world.width - 20, alpha: 1 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				
+				this.targetTileTween = this.game.add.tween(targetTile)
+					.to({ y: this.target.position.y * this.tileSize }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				
+				this.leftTileTween = this.game.add.tween(leftTile)
+					.to({ y: this.position.y * this.tileSize - 10 }, 500, Phaser.Easing.Linear.NONE, true, 0, 50, true);
+				this.rightTileTween = this.game.add.tween(rightTile)
+					.to({ y: this.position.y * this.tileSize - 10 }, 500, Phaser.Easing.Linear.NONE, true, 0, 50, true);
+				this.topTileTween = this.game.add.tween(topTile)
+					.to({ y: (this.position.y - 1) * this.tileSize - 10}, 500, Phaser.Easing.Linear.NONE, true, 0, 50, true);
+				this.bottomTileTween = this.game.add.tween(bottomTile)
+					.to({ y: (this.position.y + 1) * this.tileSize - 10}, 500, Phaser.Easing.Linear.NONE, true, 0, 50, true);
+				break;
+			case 2:
+				this.levelLabelTween = this.game.add.tween(this.levelLabel)
+					.to({ x: 20, alpha: 1 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				this.resultLabelTween = this.game.add.tween(this.resultLabel)
+					.to({ x: 10, alpha: 1 }, 500, Phaser.Easing.Linear.NONE, true, 0, 50, true);
+				this.stepsLabelTween = this.game.add.tween(this.stepsLabel)
+					.to({ x: 20, alpha: 1 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+
+				this.scoreLabelTween = this.game.add.tween(this.scoreLabel)
+					.to({ x: this.game.world.width - 20, alpha: 1 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				this.targetLabelTween = this.game.add.tween(this.targetLabel)
+					.to({ x: this.game.world.width - 20, alpha: 1 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				this.bonusStepsLabelTween = this.game.add.tween(this.bonusStepsLabel)
+					.to({ x: this.game.world.width - 20, alpha: 1 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				
+				this.targetTileTween = this.game.add.tween(targetTile)
+					.to({ y: this.target.position.y * this.tileSize }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				
+				this.leftTileTween = this.game.add.tween(leftTile)
+					.to({ y: this.position.y * this.tileSize - 10 }, 500, Phaser.Easing.Linear.NONE, true, 0, 50, true);
+				this.rightTileTween = this.game.add.tween(rightTile)
+					.to({ y: this.position.y * this.tileSize - 10 }, 500, Phaser.Easing.Linear.NONE, true, 0, 50, true);
+				this.topTileTween = this.game.add.tween(topTile)
+					.to({ y: (this.position.y - 1) * this.tileSize }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				this.bottomTileTween = this.game.add.tween(bottomTile)
+					.to({ y: (this.position.y + 1) * this.tileSize }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				break;
+			case 3:
+				this.levelLabelTween = this.game.add.tween(this.levelLabel)
+					.to({ x: 20, alpha: 1 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				this.resultLabelTween = this.game.add.tween(this.resultLabel)
+					.to({ x: 10, alpha: 1 }, 500, Phaser.Easing.Linear.NONE, true, 0, 50, true);
+				this.stepsLabelTween = this.game.add.tween(this.stepsLabel)
+					.to({ x: 20, alpha: 1 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+
+				this.scoreLabelTween = this.game.add.tween(this.scoreLabel)
+					.to({ x: this.game.world.width - 20, alpha: 1 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				this.targetLabelTween = this.game.add.tween(this.targetLabel)
+					.to({ x: this.game.world.width - 20, alpha: 1 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				this.bonusStepsLabelTween = this.game.add.tween(this.bonusStepsLabel)
+					.to({ x: this.game.world.width - 20, alpha: 1 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				
+				this.targetTileTween = this.game.add.tween(targetTile)
+					.to({ y: this.target.position.y * this.tileSize }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				
+				this.leftTileTween = this.game.add.tween(leftTile)
+					.to({ y: this.position.y * this.tileSize }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				this.rightTileTween = this.game.add.tween(rightTile)
+					.to({ y: this.position.y * this.tileSize }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				this.topTileTween = this.game.add.tween(topTile)
+					.to({ y: (this.position.y - 1) * this.tileSize - 10}, 500, Phaser.Easing.Linear.NONE, true, 0, 50, true);
+				this.bottomTileTween = this.game.add.tween(bottomTile)
+					.to({ y: (this.position.y + 1) * this.tileSize - 10}, 500, Phaser.Easing.Linear.NONE, true, 0, 50, true);
+				break;
+			case 4:
+				this.levelLabelTween = this.game.add.tween(this.levelLabel)
+					.to({ x: -80, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				this.resultLabelTween = this.game.add.tween(this.resultLabel)
+					.to({ x: -80, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				this.stepsLabelTween = this.game.add.tween(this.stepsLabel)
+					.to({ x: 10, alpha: 1 }, 500, Phaser.Easing.Linear.NONE, true, 0, 50, true);
+
+				this.scoreLabelTween = this.game.add.tween(this.scoreLabel)
+					.to({ x: this.game.world.width - 10, alpha: 1 }, 500, Phaser.Easing.Linear.NONE, true, 0, 50, true);
+				this.targetLabelTween = this.game.add.tween(this.targetLabel)
+					.to({ x: this.game.world.width + 80, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				this.bonusStepsLabelTween = this.game.add.tween(this.bonusStepsLabel)
+					.to({ x: this.game.world.width - 10, alpha: 1 }, 500, Phaser.Easing.Linear.NONE, true, 0, 50, true);
+				
+				this.targetTileTween = this.game.add.tween(targetTile)
+					.to({ y: this.target.position.y * this.tileSize }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				
+				this.leftTileTween = this.game.add.tween(leftTile)
+					.to({ y: this.position.y * this.tileSize }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				this.rightTileTween = this.game.add.tween(rightTile)
+					.to({ y: this.position.y * this.tileSize }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				this.topTileTween = this.game.add.tween(topTile)
+					.to({ y: (this.position.y - 1) * this.tileSize }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				this.bottomTileTween = this.game.add.tween(bottomTile)
+					.to({ y: (this.position.y + 1) * this.tileSize }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				break;
+			case 5:
+				this.levelLabelTween = this.game.add.tween(this.levelLabel)
+					.to({ x: -80, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				this.resultLabelTween = this.game.add.tween(this.resultLabel)
+					.to({ x: -80, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				this.stepsLabelTween = this.game.add.tween(this.stepsLabel)
+					.to({ x: 20, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+
+				this.scoreLabelTween = this.game.add.tween(this.scoreLabel)
+					.to({ x: this.game.world.width - 10, alpha: 1 }, 500, Phaser.Easing.Linear.NONE, true, 0, 50, true);
+				this.targetLabelTween = this.game.add.tween(this.targetLabel)
+					.to({ x: this.game.world.width + 80, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				this.bonusStepsLabelTween = this.game.add.tween(this.bonusStepsLabel)
+					.to({ x: this.game.world.width - 20, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				
+				this.targetTileTween = this.game.add.tween(targetTile)
+					.to({ y: this.target.position.y * this.tileSize - 10 }, 500, Phaser.Easing.Linear.NONE, true, 0, 50, true);
+				
+				this.leftTileTween = this.game.add.tween(leftTile)
+					.to({ y: this.position.y * this.tileSize }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				this.rightTileTween = this.game.add.tween(rightTile)
+					.to({ y: this.position.y * this.tileSize }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				this.topTileTween = this.game.add.tween(topTile)
+					.to({ y: (this.position.y - 1) * this.tileSize }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				this.bottomTileTween = this.game.add.tween(bottomTile)
+					.to({ y: (this.position.y + 1) * this.tileSize }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				break;
+			default:
+				this.levelLabelTween = this.game.add.tween(this.levelLabel)
+					.to({ x: 20, alpha: 1 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				this.resultLabelTween = this.game.add.tween(this.resultLabel)
+					.to({ x: 20, alpha: 1 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				this.stepsLabelTween = this.game.add.tween(this.stepsLabel)
+					.to({ x: 20, alpha: 1 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+
+				this.scoreLabelTween = this.game.add.tween(this.scoreLabel)
+					.to({ x: this.game.world.width - 20, alpha: 1 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				this.targetLabelTween = this.game.add.tween(this.targetLabel)
+					.to({ x: this.game.world.width - 20, alpha: 1 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				this.bonusStepsLabelTween = this.game.add.tween(this.bonusStepsLabel)
+					.to({ x: this.game.world.width - 20, alpha: 1 }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				
+				this.targetTileTween = this.game.add.tween(targetTile)
+					.to({ y: this.target.position.y * this.tileSize }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				
+				this.leftTileTween = this.game.add.tween(leftTile)
+					.to({ y: this.position.y * this.tileSize }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				this.rightTileTween = this.game.add.tween(rightTile)
+					.to({ y: this.position.y * this.tileSize }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				this.topTileTween = this.game.add.tween(topTile)
+					.to({ y: (this.position.y - 1) * this.tileSize }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				this.bottomTileTween = this.game.add.tween(bottomTile)
+					.to({ y: (this.position.y + 1) * this.tileSize }, 500, Phaser.Easing.Linear.NONE, true, 0, 0, false);
+				break;
+		}
+	},
 	moveTo: function (x, y) {
-		var change = {
-			x: this.position.x - x,
-			y: this.position.y - y
-		};
+		if (this.tutorialIndex === -1) {
+			var change = {
+				x: this.position.x - x,
+				y: this.position.y - y
+			};
 
-		if (this.board.distance(x, y, this.position.x, this.position.y) === 1) {
-			this.position.x = x;
-			this.position.y = y;
-			this.steps++;
+			if (this.board.distance(x, y, this.position.x, this.position.y) === 1) {
+				this.position.x = x;
+				this.position.y = y;
+				this.steps++;
 
-			if (change.x !== 0) {
-				this.result += this.node[this.position.x][this.position.y].value;
-			} else if (change.y !== 0) {
-				this.result *= this.node[this.position.x][this.position.y].value;
-			}
+				if (change.x !== 0) {
+					this.result += this.node[this.position.x][this.position.y].value;
+				} else if (change.y !== 0) {
+					this.result *= this.node[this.position.x][this.position.y].value;
+				}
 
-			if (this.target.value === this.result) {
-				// win
-				this.game.state.start('finish', true, false, this.level, { value: this.result, position: this.position, steps: this.steps }, this.target, this.difficulty);
-			} else if (this.target.value < this.result) {
-				// lose
-				this.game.state.start('finish', true, false, this.level, { value: this.result, position: this.position, steps: this.steps }, this.target, this.difficulty);
-			} else {
-				this.updateView();
+				if (this.target.value === this.result) {
+					// win
+					this.game.state.start('finish', true, false, this.level, { value: this.result, position: this.position, steps: this.steps }, this.target, this.difficulty);
+				} else if (this.target.value < this.result) {
+					// lose
+					this.game.state.start('finish', true, false, this.level, { value: this.result, position: this.position, steps: this.steps }, this.target, this.difficulty);
+				} else {
+					this.updateView();
+				}
 			}
 		}
 	}
 };
 
 module.exports = Play;
-},{"./../components/board.js":137,"./../components/label_button.js":138,"./../mathmaze/bot.js":140,"lodash":96}],146:[function(require,module,exports){
+},{"../components/board.js":156,"../components/label_button.js":157,"../mathmaze/bot.js":162,"localize":99,"lodash":100}],170:[function(require,module,exports){
 'use strict';
 
 function Preload() {
@@ -39470,21 +43519,23 @@ function Preload() {
 
 Preload.prototype = {
 	preload: function() {
-		this.asset = this.add.sprite(this.width / 2, this.height / 2, 'preloader');
+		this.game.service.init();
+		
+		this.asset = this.add.sprite(this.game.world.centerX, this.game.world.centerY, 'preloader');
 		this.asset.anchor.setTo(0.5, 0.5);
 
 		this.load.onLoadComplete.addOnce(this.onLoadComplete, this);
 		this.load.setPreloadSprite(this.asset);
 		this.load.image('math-maze-logo', 'assets/math-maze-logo.png');
-		this.load.image('pointer', 'assets/pointer.png');
+		//this.load.image('pointer', 'assets/pointer.png');
 		this.load.image('btn', 'assets/btn.png');
 		
-		for (var i = 0; i < 10; i++)
+		/*for (var i = 0; i < 10; i++)
 		{
 			this.load.image('tile-' + i, 'assets/tile-' + i + '.png');
-		}
+		}*/
 		
-		this.game.load.script('webfont', '//ajax.googleapis.com/ajax/libs/webfont/1.4.7/webfont.js');
+		//this.load.script('webfont', '//ajax.googleapis.com/ajax/libs/webfont/1.4.7/webfont.js');
 	},
 	create: function() {
 		this.asset.cropEnabled = false;
@@ -39501,4 +43552,4 @@ Preload.prototype = {
 
 module.exports = Preload;
 
-},{}]},{},[139]);
+},{}]},{},[161]);

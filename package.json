@@ -10,8 +10,10 @@
   ],
   "dependencies": {
     "js-md5": "^0.4.1",
+    "localize": "^0.4.7",
     "lodash": "^4.15.0",
     "phaser": "^2.6.1",
+    "promise": "^7.1.1",
     "random-seed": "^0.3.0"
   },
   "devDependencies": {
