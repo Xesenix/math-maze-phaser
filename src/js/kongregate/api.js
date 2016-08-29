@@ -1,56 +1,51 @@
 'use strict';
 /* global localStorage, kongregateAPI */
+var _ = require('lodash');
 var Promise = require('promise');
+//var settings = require('./settings.js');
 var kongregate = null;
-
+var authenticatedDeffer = null;
 var authenticationPromise = null;
+var API = null;
 
 var InitApi = new Promise(function(resolve) {
-	console.log('init kongregate api');
 	if (kongregate === null) {
-		console.log('load kongregate api', kongregate);
 		kongregateAPI.loadAPI(function () {
 			kongregate = kongregateAPI.getAPI();
-			console.log('kongregate ready', kongregate);
-			
 			kongregate.services.addEventListener('login', function() {
-				console.log('authenticated');
-				authenticationPromise.resolve();
+				API.getUser().then(authenticatedDeffer);
 			});
 			
-			console.log('resolve kongregate api');
 			resolve();
 		});
 	} else {
-		console.log('return kongregate api');
 		resolve();
 	}
 });
 
-var API = {
+API = {
 	init: function() {
-		authenticationPromise = new Promise(function(resolve) {
-			if (!API.user.guest) {
-				resolve();
-			}
+		authenticationPromise = new Promise(function(resolve) { 
+			authenticatedDeffer = resolve;
 		});
 		return this.getUser();
 	},
 	authenticate: function() {
+		kongregate.services.showRegistrationBox();
 		return authenticationPromise;
 	},
 	user: null,
 	getUser: function() {
 		return InitApi
 			.then(function() {
-				API.user = {
-					userId: kongregate.services.getUserId(),
-					username: kongregate.services.getUsername(),
-					token: kongregate.services.getGameAuthToken(),
-					guest: kongregate.services.isGuest()
-				};
-				
-				console.log('getUserData', kongregate.services.isGuest(), API.user);
+				if (API.user === null || API.user.guest) {
+					API.user = {
+						userId: kongregate.services.getUserId(),
+						username: kongregate.services.getUsername(),
+						token: kongregate.services.getGameAuthToken(),
+						guest: kongregate.services.isGuest()
+					};
+				}
 			});
 	},
 	getUserData: function(key) {
@@ -66,6 +61,20 @@ var API = {
 				// TODO: replace with playfab implementation
 				localStorage.setItem(key, JSON.stringify(value));
 			});
+	},
+	setScore: function(key, value) {
+		return new Promise(function(resolve) {
+			kongregate.stats.submit(key, value);
+			resolve();
+		});
+	},
+	setScores: function(values) {
+		return new Promise(function(resolve) {
+			_.each(values, function(value, key) {
+				kongregate.stats.submit(key, value);
+			});
+			resolve();
+		});
 	}
 };
 

@@ -92,24 +92,28 @@ Intro.prototype = {
 				growthPoints: 1,
 				points: 0,
 				unlocked: 1,
+				perfect: 0,
 				config: easyDifficulty
 			},
 			medium: {
 				growthPoints: 5,
 				points: 0,
 				unlocked: 1,
+				perfect: 0,
 				config: mediumDifficulty
 			},
 			hard: {
 				growthPoints: 10,
 				points: 0,
 				unlocked: 1,
+				perfect: 0,
 				config: hardDifficulty
 			},
 			insane: {
 				growthPoints: 20,
 				points: 0,
 				unlocked: 1,
+				perfect: 0,
 				config: insaneDifficulty
 			}
 		}, gameSave.progress);

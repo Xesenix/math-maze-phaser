@@ -7,8 +7,6 @@ function Preload() {
 
 Preload.prototype = {
 	preload: function() {
-		this.game.service.init();
-		
 		this.asset = this.add.sprite(this.game.world.centerX, this.game.world.centerY, 'preloader');
 		this.asset.anchor.setTo(0.5, 0.5);
 

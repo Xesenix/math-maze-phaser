@@ -9,7 +9,7 @@ function GamejoltSetupState() {}
 
 GamejoltSetupState.prototype = {
 	init: function() {
-		ServiceApi.getUserData('save')
+		ServiceApi.getUserData('gameSave')
 			.then(_.bind(this.onData, this))
 			.catch(_.bind(this.onError, this));
 	},

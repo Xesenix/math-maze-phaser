@@ -9,21 +9,12 @@
 	var IntroState = require('./states/intro.js');
 	var game = new Phaser.Game(800, 600, Phaser.AUTO, 'game');
 	
-	var ServiceSetupState = null;
-	var ServiceApi = null;
-	
-	switch ('kongregate') {
-		case 'kongregate':
-			ServiceSetupState = require('./states/kongregate.js');
-			ServiceApi = require('./kongregate/api.js');
-			break;
-		case 'gamejolt':
-			ServiceSetupState = require('./states/gamejolt.js');
-			ServiceApi = require('./gamejolt/api.js');
-			break;
-	}
+	var ServiceSetupState = require('./states/kongregate.js');
+	var ServiceApi = require('./kongregate/api.js');
 	
 	game.service = ServiceApi;
+	game.service.init();
+	
 	// Game States
 
 	game.state.add('boot', BootState);

@@ -150,7 +150,7 @@ Menu.prototype = {
 		);
 		this.scoreLabel.anchor.setTo(0.5, 0.5);
 
-		if (typeof(this.game.service.user) !== 'undefined' && this.game.service.user !== null) {
+		if (typeof(this.game.service.user) !== 'undefined' && this.game.service.user !== null && !this.game.service.user.guest) {
 			this.loginLabel = this.game.add.text(
 				this.game.world.centerX, 
 				150, 

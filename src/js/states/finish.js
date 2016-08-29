@@ -69,6 +69,7 @@ Finish.prototype = {
 		this.target = target;
 		
 		this.points = 0;
+		this.isPerfect = false;
 		
 		localization.setLocale(this.game.lang || 'en');
 	},
@@ -147,6 +148,7 @@ Finish.prototype = {
 				if (this.result.position.x === this.target.position.x && this.result.position.y === this.target.position.y) {
 					bonus += '\n' + localization.translate('End position bonus x2');
 					this.points *= 2;
+					this.isPerfect = true;
 					this.titleText = this.game.add.text(
 						this.game.world.centerX,
 						100,
@@ -295,23 +297,31 @@ Finish.prototype = {
 				this.difficulty.unlocked ++;
 				this.difficulty.points += this.points;
 				
+				if (this.isPerfect) {
+					this.difficulty.perfect ++;
+				}
+				
 				var gameSave = {
 					progress: {
 						easy: {
 							unlocked: this.game.mode.easy.unlocked,
-							points: this.game.mode.easy.points
+							points: this.game.mode.easy.points,
+							perfect: this.game.mode.easy.perfect
 						},
 						medium: {
 							unlocked: this.game.mode.medium.unlocked,
-							points: this.game.mode.medium.points
+							points: this.game.mode.medium.points,
+							perfect: this.game.mode.medium.perfect
 						},
 						hard: {
 							unlocked: this.game.mode.hard.unlocked,
-							points: this.game.mode.hard.points
+							points: this.game.mode.hard.points,
+							perfect: this.game.mode.hard.perfect
 						},
 						insane: {
 							unlocked: this.game.mode.insane.unlocked,
-							points: this.game.mode.insane.points
+							points: this.game.mode.insane.points,
+							perfect: this.game.mode.insane.perfect
 						}
 					}
 				};
@@ -319,6 +329,24 @@ Finish.prototype = {
 				gameSave.hash = md5(gameSave.progress);
 				
 				this.game.service.setUserData('gameSave', gameSave);
+				
+				this.game.service.setScores({
+					'EasyLevel': this.game.mode.easy.unlocked,
+					'MediumLevel': this.game.mode.medium.unlocked,
+					'HardLevel': this.game.mode.hard.unlocked,
+					'InsaneLevel': this.game.mode.insane.unlocked,
+					'TotalLevel': this.game.mode.easy.unlocked + this.game.mode.medium.unlocked + this.game.mode.hard.unlocked + this.game.mode.insane.unlocked,
+					'EasyPoints': this.game.mode.easy.points,
+					'MediumPoints': this.game.mode.medium.points,
+					'HardPoints': this.game.mode.hard.points,
+					'InsanePoints': this.game.mode.insane.points,
+					'TotalPoints': this.game.mode.easy.points + this.game.mode.medium.points + this.game.mode.hard.points + this.game.mode.insane.points,
+					'EasyPerfect': this.game.mode.easy.perfect,
+					'MediumPerfect': this.game.mode.medium.perfect,
+					'HardPerfect': this.game.mode.hard.perfect,
+					'InsanePerfect': this.game.mode.insane.perfect,
+					'TotalPerfect': this.game.mode.easy.perfect + this.game.mode.medium.perfect + this.game.mode.hard.perfect + this.game.mode.insane.perfect
+				});
 			}
 			
 			this.game.state.start('play', true, false, this.level + 1, this.difficulty);

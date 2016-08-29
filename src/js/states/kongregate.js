@@ -1,13 +1,13 @@
 'use strict';
 var _ = require('lodash');
 var LabelButton = require('../components/label_button.js');
-var ServiceApi = require('../kongregate/api.js');
+var md5 = require('js-md5');
 
 function KongregateSetupState() {}
 
 KongregateSetupState.prototype = {
 	init: function() {
-		ServiceApi.getUserData('gameSave')
+		this.game.service.getUserData('gameSave')
 			.then(_.bind(this.onData, this))
 			.catch(_.bind(this.onError, this));
 	},
@@ -45,16 +45,61 @@ KongregateSetupState.prototype = {
 		this.game.world.add(this.cancelButton);
 	},
 	login: function() {
-		console.log('on login ');
-		ServiceApi.authenticate().then(_.bind(this.onData, this));
+		this.game.service.authenticate().then(_.bind(this.onData, this));
 	},
 	cancel: function() {
-		console.log('on cancel ');
+		this.game.service.setScores({
+			'EasyLevel': this.game.mode.easy.unlocked,
+			'MediumLevel': this.game.mode.medium.unlocked,
+			'HardLevel': this.game.mode.hard.unlocked,
+			'InsaneLevel': this.game.mode.insane.unlocked,
+			'TotalLevel': this.game.mode.easy.unlocked + this.game.mode.medium.unlocked + this.game.mode.hard.unlocked + this.game.mode.insane.unlocked,
+			'EasyPoints': this.game.mode.easy.points,
+			'MediumPoints': this.game.mode.medium.points,
+			'HardPoints': this.game.mode.hard.points,
+			'InsanePoints': this.game.mode.insane.points,
+			'TotalPoints': this.game.mode.easy.points + this.game.mode.medium.points + this.game.mode.hard.points + this.game.mode.insane.points,
+			'EasyPerfect': this.game.mode.easy.perfect,
+			'MediumPerfect': this.game.mode.medium.perfect,
+			'HardPerfect': this.game.mode.hard.perfect,
+			'InsanePerfect': this.game.mode.insane.perfect,
+			'TotalPerfect': this.game.mode.easy.perfect + this.game.mode.medium.perfect + this.game.mode.hard.perfect + this.game.mode.insane.perfect
+		});
+		
 		this.game.state.start('menu', true, false);
 	},
-	onData: function(response) {
-		console.log('on data ', response, ServiceApi.user);
-		this.game.state.start('menu', true, false);
+	onData: function(gameSave) {
+		if (!this.game.service.user.guest) {
+			gameSave = _.extend({
+				hash: null,
+				progress: {}
+			}, gameSave);
+
+			if (gameSave.hash !== md5(gameSave.progress)) {
+				gameSave.progress = {};
+			}
+
+			this.game.mode = _.merge(this.game.mode, gameSave.progress);
+			
+			this.game.service.setScores({
+				'EasyLevel': this.game.mode.easy.unlocked,
+				'MediumLevel': this.game.mode.medium.unlocked,
+				'HardLevel': this.game.mode.hard.unlocked,
+				'InsaneLevel': this.game.mode.insane.unlocked,
+				'TotalLevel': this.game.mode.easy.unlocked + this.game.mode.medium.unlocked + this.game.mode.hard.unlocked + this.game.mode.insane.unlocked,
+				'EasyPoints': this.game.mode.easy.points,
+				'MediumPoints': this.game.mode.medium.points,
+				'HardPoints': this.game.mode.hard.points,
+				'InsanePoints': this.game.mode.insane.points,
+				'TotalPoints': this.game.mode.easy.points + this.game.mode.medium.points + this.game.mode.hard.points + this.game.mode.insane.points,
+				'EasyPerfect': this.game.mode.easy.perfect,
+				'MediumPerfect': this.game.mode.medium.perfect,
+				'HardPerfect': this.game.mode.hard.perfect,
+				'InsanePerfect': this.game.mode.insane.perfect,
+				'TotalPerfect': this.game.mode.easy.perfect + this.game.mode.medium.perfect + this.game.mode.hard.perfect + this.game.mode.insane.perfect
+			});
+			this.game.state.start('menu', true, false);
+		}
 	},
 	onError: function(response) {
 		console.log('on error ', response);
