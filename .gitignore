@@ -1,3 +1,7 @@
 node_modules
 
 *.log
+src/js/gamejolt/settings.js
+public/math_maze_v0_2_2.zip
+public/math_maze_v0_0_1.zip
+src/js/playfab/settings.js

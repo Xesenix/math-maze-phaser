@@ -13,6 +13,9 @@
 	var ServiceApi = require('./kongregate/api.js');
 	
 	game.service = ServiceApi;
+	
+	game.dataStorage = ServiceApi;
+	
 	game.service.init();
 	
 	// Game States

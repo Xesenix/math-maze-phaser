@@ -48,11 +48,11 @@ API = {
 				}
 			});
 	},
-	getUserData: function(key) {
+	getUserData: function(key, defaultValue) {
 		return API.getUser()
 			.then(function() {
 				// TODO: replace with playfab implementation
-				return JSON.parse(localStorage.getItem(key));
+				return JSON.parse(localStorage.getItem(key)) || defaultValue;
 			});
 	},
 	setUserData: function(key, value) {
@@ -73,6 +73,14 @@ API = {
 			_.each(values, function(value, key) {
 				kongregate.stats.submit(key, value);
 			});
+			resolve();
+		});
+	},
+	checkTrophies: function() {
+		// this is template method - there is no implementation when you are not using any specific webservice
+		// but still you can call it from code so it can be easily switched to concrete implementation of service api 
+		// wichout need to fixing all spots where this call is needed
+		return new Promise(function(resolve) {
 			resolve();
 		});
 	}

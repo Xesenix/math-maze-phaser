@@ -2,6 +2,7 @@
 /* global Phaser, localStorage */
 var _ = require('lodash');
 var LabelButton = require('../components/label_button.js');
+var MuteButton = require('../components/mute_button.js');
 var Localize = require('localize');
 var localization = new Localize({
 	'Score: $[1]': {
@@ -149,6 +150,13 @@ Menu.prototype = {
 			{ font: '40px ' + this.game.theme.font, fill: '#ffffff', align: 'center'}
 		);
 		this.scoreLabel.anchor.setTo(0.5, 0.5);
+		
+		this.muteButton = new MuteButton(this.game, 24, this.world.height - 24, 'mute');
+		this.muteButton.anchor.setTo(0.5, 0.5);
+		this.muteButton.width = 32;
+		this.muteButton.height = 32;
+		
+		this.world.add(this.muteButton);
 
 		if (typeof(this.game.service.user) !== 'undefined' && this.game.service.user !== null && !this.game.service.user.guest) {
 			this.loginLabel = this.game.add.text(

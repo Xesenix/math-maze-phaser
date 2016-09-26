@@ -347,6 +347,8 @@ Finish.prototype = {
 					'InsanePerfect': this.game.mode.insane.perfect,
 					'TotalPerfect': this.game.mode.easy.perfect + this.game.mode.medium.perfect + this.game.mode.hard.perfect + this.game.mode.insane.perfect
 				});
+				
+				this.game.service.checkTrophies(gameSave.progress);
 			}
 			
 			this.game.state.start('play', true, false, this.level + 1, this.difficulty);

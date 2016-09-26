@@ -1,5 +1,6 @@
 'use strict';
 /* global Phaser, localStorage */
+var MuteButton = require('../components/mute_button.js');
 var md5 = require('js-md5');
 var _ = require('lodash');
 
@@ -138,6 +139,14 @@ Intro.prototype = {
 		this.game.add.tween(this.titleText).from({ y: this.game.world.height + 40}, 500, Phaser.Easing.Linear.NONE, true, 500, 0, false);
 		this.game.add.tween(this.authorText).from({ alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 1000, 0, false);
 		this.game.add.tween(this.instructionsText).from({ alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 1500, 0, false);
+		
+		if (typeof this.game.music === 'undefined') {
+			this.game.music = this.game.add.audio('melody');
+
+			this.game.music.loopFull();
+			
+			MuteButton.loadState(this.game);
+		}
 	},
 	update: function() {
 		if (this.game.input.activePointer.justPressed()) {

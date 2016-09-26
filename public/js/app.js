@@ -40065,6 +40065,42 @@ Object.defineProperty(LabelButton.prototype, 'width', {
 module.exports = LabelButton;
 },{}],152:[function(require,module,exports){
 'use strict';
+/* global Phaser */
+var _ = require('lodash');
+
+var MuteButton = function(game, x, y, key) {
+	Phaser.Button.call(this, game, x, y, key, _.bind(this.toggleMusic, this));
+	this.updateState();
+};
+
+MuteButton.prototype = Object.create(Phaser.Button.prototype);
+MuteButton.prototype.constructor = MuteButton;
+
+MuteButton.prototype.toggleMusic = function() {
+	this.game.sound.mute = !this.game.sound.mute;
+	this.updateState();
+	
+	this.game.dataStorage.setUserData('mute', this.game.sound.mute);
+};
+
+MuteButton.prototype.updateState = function() {
+	if (this.game.sound.mute) {
+		this.setFrames(0, 1, 0, 1);
+	} else {
+		this.setFrames(1, 0, 1, 0);
+	}
+};
+
+MuteButton.loadState = function(game) {
+	game.sound.mute = false;
+	game.dataStorage.getUserData('mute').then(function(muted) {
+		game.sound.mute = muted;
+	});
+};
+
+module.exports = MuteButton;
+},{"lodash":100}],153:[function(require,module,exports){
+'use strict';
 /* global localStorage, kongregateAPI */
 var _ = require('lodash');
 var Promise = require('promise');
@@ -40114,11 +40150,11 @@ API = {
 				}
 			});
 	},
-	getUserData: function(key) {
+	getUserData: function(key, defaultValue) {
 		return API.getUser()
 			.then(function() {
 				// TODO: replace with playfab implementation
-				return JSON.parse(localStorage.getItem(key));
+				return JSON.parse(localStorage.getItem(key)) || defaultValue;
 			});
 	},
 	setUserData: function(key, value) {
@@ -40141,11 +40177,19 @@ API = {
 			});
 			resolve();
 		});
+	},
+	checkTrophies: function() {
+		// this is template method - there is no implementation when you are not using any specific webservice
+		// but still you can call it from code so it can be easily switched to concrete implementation of service api 
+		// wichout need to fixing all spots where this call is needed
+		return new Promise(function(resolve) {
+			resolve();
+		});
 	}
 };
 
 module.exports = API;
-},{"lodash":100,"promise":111}],153:[function(require,module,exports){
+},{"lodash":100,"promise":111}],154:[function(require,module,exports){
 /* global Phaser */
 
 (function () {
@@ -40161,6 +40205,9 @@ module.exports = API;
 	var ServiceApi = require('./kongregate/api.js');
 	
 	game.service = ServiceApi;
+	
+	game.dataStorage = ServiceApi;
+	
 	game.service.init();
 	
 	// Game States
@@ -40177,7 +40224,7 @@ module.exports = API;
 
 	console.log("Game started", game);
 })();
-},{"./kongregate/api.js":152,"./states/boot.js":155,"./states/finish.js":156,"./states/intro.js":157,"./states/kongregate.js":158,"./states/menu.js":159,"./states/play.js":160,"./states/preload.js":161}],154:[function(require,module,exports){
+},{"./kongregate/api.js":153,"./states/boot.js":156,"./states/finish.js":157,"./states/intro.js":158,"./states/kongregate.js":159,"./states/menu.js":160,"./states/play.js":161,"./states/preload.js":162}],155:[function(require,module,exports){
 var _ = require('lodash');
 
 var Bot = function (vertical, horizontal) {
@@ -40232,9 +40279,9 @@ Bot.prototype = {
 };
 
 module.exports = Bot;
-},{"lodash":100}],155:[function(require,module,exports){
-'use strict';
-/* global window */
+},{"lodash":100}],156:[function(require,module,exports){
+/* global window, Phaser */
+var _ = require('lodash');
 
 function Boot() {
 }
@@ -40261,9 +40308,42 @@ Boot.prototype = {
 	}
 };
 
+
+Boot.prototype = {
+	preload: function() {
+		console.log('preload boot');
+		this.load.image('preloader', 'assets/preloader.gif');
+		
+		// setup fonts and interface apperance
+		this.game.theme = {
+			font: 'Ubuntu'
+		};
+		
+		window.WebFontConfig = {
+			active: _.bind(function() {
+				console.log('fonts ready 1/2');
+				this.game.time.events.add(Phaser.Timer.SECOND, this.onFontsReady, this);
+			}, this),
+			google: {
+				families: ['Ubuntu::latin-ext']
+			}
+		};
+		this.load.script("webfont", "//ajax.googleapis.com/ajax/libs/webfont/1.4.7/webfont.js");
+	},
+	create: function() {
+		console.log('boot create');
+		this.game.input.maxPointers = 1;
+	},
+	onFontsReady: function() {
+		console.log('fonts ready 2/2');
+		
+		this.game.state.start('preload');
+	}
+};
+
 module.exports = Boot;
 
-},{}],156:[function(require,module,exports){
+},{"lodash":100}],157:[function(require,module,exports){
 'use strict';
 /* global Phaser */
 var md5 = require('js-md5');
@@ -40613,6 +40693,8 @@ Finish.prototype = {
 					'InsanePerfect': this.game.mode.insane.perfect,
 					'TotalPerfect': this.game.mode.easy.perfect + this.game.mode.medium.perfect + this.game.mode.hard.perfect + this.game.mode.insane.perfect
 				});
+				
+				this.game.service.checkTrophies(gameSave.progress);
 			}
 			
 			this.game.state.start('play', true, false, this.level + 1, this.difficulty);
@@ -40624,9 +40706,10 @@ Finish.prototype = {
 
 module.exports = Finish;
 
-},{"../components/label_button.js":151,"js-md5":97,"localize":99,"lodash":100}],157:[function(require,module,exports){
+},{"../components/label_button.js":151,"js-md5":97,"localize":99,"lodash":100}],158:[function(require,module,exports){
 'use strict';
 /* global Phaser, localStorage */
+var MuteButton = require('../components/mute_button.js');
 var md5 = require('js-md5');
 var _ = require('lodash');
 
@@ -40765,6 +40848,14 @@ Intro.prototype = {
 		this.game.add.tween(this.titleText).from({ y: this.game.world.height + 40}, 500, Phaser.Easing.Linear.NONE, true, 500, 0, false);
 		this.game.add.tween(this.authorText).from({ alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 1000, 0, false);
 		this.game.add.tween(this.instructionsText).from({ alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 1500, 0, false);
+		
+		if (typeof this.game.music === 'undefined') {
+			this.game.music = this.game.add.audio('melody');
+
+			this.game.music.loopFull();
+			
+			MuteButton.loadState(this.game);
+		}
 	},
 	update: function() {
 		if (this.game.input.activePointer.justPressed()) {
@@ -40774,7 +40865,7 @@ Intro.prototype = {
 };
 
 module.exports = Intro;
-},{"js-md5":97,"lodash":100}],158:[function(require,module,exports){
+},{"../components/mute_button.js":152,"js-md5":97,"lodash":100}],159:[function(require,module,exports){
 'use strict';
 var _ = require('lodash');
 var LabelButton = require('../components/label_button.js');
@@ -40884,11 +40975,12 @@ KongregateSetupState.prototype = {
 };
 
 module.exports = KongregateSetupState;
-},{"../components/label_button.js":151,"js-md5":97,"lodash":100}],159:[function(require,module,exports){
+},{"../components/label_button.js":151,"js-md5":97,"lodash":100}],160:[function(require,module,exports){
 'use strict';
 /* global Phaser, localStorage */
 var _ = require('lodash');
 var LabelButton = require('../components/label_button.js');
+var MuteButton = require('../components/mute_button.js');
 var Localize = require('localize');
 var localization = new Localize({
 	'Score: $[1]': {
@@ -41036,6 +41128,13 @@ Menu.prototype = {
 			{ font: '40px ' + this.game.theme.font, fill: '#ffffff', align: 'center'}
 		);
 		this.scoreLabel.anchor.setTo(0.5, 0.5);
+		
+		this.muteButton = new MuteButton(this.game, 24, this.world.height - 24, 'mute');
+		this.muteButton.anchor.setTo(0.5, 0.5);
+		this.muteButton.width = 32;
+		this.muteButton.height = 32;
+		
+		this.world.add(this.muteButton);
 
 		if (typeof(this.game.service.user) !== 'undefined' && this.game.service.user !== null && !this.game.service.user.guest) {
 			this.loginLabel = this.game.add.text(
@@ -41092,13 +41191,14 @@ Menu.prototype = {
 
 module.exports = Menu;
 
-},{"../components/label_button.js":151,"localize":99,"lodash":100}],160:[function(require,module,exports){
+},{"../components/label_button.js":151,"../components/mute_button.js":152,"localize":99,"lodash":100}],161:[function(require,module,exports){
 'use strict';
 /* global Phaser */
 var _ = require('lodash');
 var Board = require('../components/board.js');
 var Bot = require('../mathmaze/bot.js');
 var LabelButton = require('../components/label_button.js');
+var MuteButton = require('../components/mute_button.js');
 var Localize = require('localize');
 var localization = new Localize({
     'Easy level: $[1]': {
@@ -41145,7 +41245,7 @@ Play.prototype = {
 	tutorialIndex: -1,
 	tutorialStep: [
 		'Your goal is to make current value equal to target value.\n',
-		'Use eighter arrows, a/s/d/w or mouse to change you position.',
+		'Use eighter arrows, a/s/d/w or mouse to change your current position\nindicated by green squere.',
 		'When you move horizontal (left/right)\nyou add value in squere you moved to your current collected value.',
 		'When you move vertical (top/down)\n you multiply your current collected value by amount in tile you moved to.',
 		'You get points x2 bonus for finishing in less then required amount of steps.',
@@ -41202,6 +41302,13 @@ Play.prototype = {
 		//this.pointer = this.game.add.sprite(this.offsetX + this.position.x * tileSize - 32, this.offsetY + this.position.y * tileSize - 32, 'pointer');
 		//this.pointer.scale.setTo(192 / 256 * scale, 192 / 256 * scale);
 		this.reset();
+		
+		this.game.dataStorage.getUserData('tutorial', false).then(_.bind(function(value) {
+			console.log('tutorial completed?', value);
+			if (value !== true) {
+				this.tutorial();
+			}
+		}), this);
 	},
 	setupKeyboard: function() {
 		this.resetKey = this.game.input.keyboard.addKey(Phaser.Keyboard.R);
@@ -41420,6 +41527,13 @@ Play.prototype = {
 		this.menuButton.label.setStyle({ font: '28px ' + this.game.theme.font, fill: '#000000' }, true);
 		this.game.world.add(this.menuButton);
 		
+		this.muteButton = new MuteButton(this.game, 24, this.world.height - 24, 'mute');
+		this.muteButton.anchor.setTo(0.5, 0.5);
+		this.muteButton.width = 32;
+		this.muteButton.height = 32;
+		
+		this.world.add(this.muteButton);
+		
 		this.game.add.tween(this.levelLabel)
 			.from({ x: this.levelLabel.x - 100, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 500, 0, false);
 		this.game.add.tween(this.resultLabel)
@@ -41560,7 +41674,7 @@ Play.prototype = {
 				this.world.centerX,
 				150,
 				'btn', 
-				localization.translate('Back'),
+				localization.translate('Play'),
 				_.bind(this.tutorial, this, -1)
 			);
 			this.helpBackButton.anchor.setTo(0.5, 1);
@@ -41618,6 +41732,8 @@ Play.prototype = {
 		this.helpNextButton = null;
 		this.helpPrevButton = null;
 		this.tutorialGroup = null;
+		
+		this.game.dataStorage.setUserData('tutorial', true);
 	},
 	tutorial: function() {
 		this.createTutorial();
@@ -41913,7 +42029,7 @@ Play.prototype = {
 };
 
 module.exports = Play;
-},{"../components/board.js":150,"../components/label_button.js":151,"../mathmaze/bot.js":154,"localize":99,"lodash":100}],161:[function(require,module,exports){
+},{"../components/board.js":150,"../components/label_button.js":151,"../components/mute_button.js":152,"../mathmaze/bot.js":155,"localize":99,"lodash":100}],162:[function(require,module,exports){
 'use strict';
 
 function Preload() {
@@ -41929,15 +42045,11 @@ Preload.prototype = {
 		this.load.onLoadComplete.addOnce(this.onLoadComplete, this);
 		this.load.setPreloadSprite(this.asset);
 		this.load.image('math-maze-logo', 'assets/math-maze-logo.png');
-		//this.load.image('pointer', 'assets/pointer.png');
 		this.load.image('btn', 'assets/btn.png');
 		
-		/*for (var i = 0; i < 10; i++)
-		{
-			this.load.image('tile-' + i, 'assets/tile-' + i + '.png');
-		}*/
+		this.load.audio('melody', 'assets/math_maze.ogg');
 		
-		//this.load.script('webfont', '//ajax.googleapis.com/ajax/libs/webfont/1.4.7/webfont.js');
+		this.load.spritesheet('mute', 'assets/mute.png', 64, 64);
 	},
 	create: function() {
 		this.asset.cropEnabled = false;
@@ -41954,4 +42066,4 @@ Preload.prototype = {
 
 module.exports = Preload;
 
-},{}]},{},[153]);
+},{}]},{},[154]);

@@ -4,6 +4,7 @@ var _ = require('lodash');
 var Board = require('../components/board.js');
 var Bot = require('../mathmaze/bot.js');
 var LabelButton = require('../components/label_button.js');
+var MuteButton = require('../components/mute_button.js');
 var Localize = require('localize');
 var localization = new Localize({
     'Easy level: $[1]': {
@@ -50,7 +51,7 @@ Play.prototype = {
 	tutorialIndex: -1,
 	tutorialStep: [
 		'Your goal is to make current value equal to target value.\n',
-		'Use eighter arrows, a/s/d/w or mouse to change you position.',
+		'Use eighter arrows, a/s/d/w or mouse to change your current position\nindicated by green squere.',
 		'When you move horizontal (left/right)\nyou add value in squere you moved to your current collected value.',
 		'When you move vertical (top/down)\n you multiply your current collected value by amount in tile you moved to.',
 		'You get points x2 bonus for finishing in less then required amount of steps.',
@@ -107,6 +108,13 @@ Play.prototype = {
 		//this.pointer = this.game.add.sprite(this.offsetX + this.position.x * tileSize - 32, this.offsetY + this.position.y * tileSize - 32, 'pointer');
 		//this.pointer.scale.setTo(192 / 256 * scale, 192 / 256 * scale);
 		this.reset();
+		
+		this.game.dataStorage.getUserData('tutorial', false).then(_.bind(function(value) {
+			console.log('tutorial completed?', value);
+			if (value !== true) {
+				this.tutorial();
+			}
+		}), this);
 	},
 	setupKeyboard: function() {
 		this.resetKey = this.game.input.keyboard.addKey(Phaser.Keyboard.R);
@@ -325,6 +333,13 @@ Play.prototype = {
 		this.menuButton.label.setStyle({ font: '28px ' + this.game.theme.font, fill: '#000000' }, true);
 		this.game.world.add(this.menuButton);
 		
+		this.muteButton = new MuteButton(this.game, 24, this.world.height - 24, 'mute');
+		this.muteButton.anchor.setTo(0.5, 0.5);
+		this.muteButton.width = 32;
+		this.muteButton.height = 32;
+		
+		this.world.add(this.muteButton);
+		
 		this.game.add.tween(this.levelLabel)
 			.from({ x: this.levelLabel.x - 100, alpha: 0 }, 500, Phaser.Easing.Linear.NONE, true, 500, 0, false);
 		this.game.add.tween(this.resultLabel)
@@ -465,7 +480,7 @@ Play.prototype = {
 				this.world.centerX,
 				150,
 				'btn', 
-				localization.translate('Back'),
+				localization.translate('Play'),
 				_.bind(this.tutorial, this, -1)
 			);
 			this.helpBackButton.anchor.setTo(0.5, 1);
@@ -523,6 +538,8 @@ Play.prototype = {
 		this.helpNextButton = null;
 		this.helpPrevButton = null;
 		this.tutorialGroup = null;
+		
+		this.game.dataStorage.setUserData('tutorial', true);
 	},
 	tutorial: function() {
 		this.createTutorial();
