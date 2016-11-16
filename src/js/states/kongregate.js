@@ -1,4 +1,5 @@
 'use strict';
+/* global Phaser */
 var _ = require('lodash');
 var LabelButton = require('../components/label_button.js');
 var md5 = require('js-md5');
@@ -43,6 +44,12 @@ KongregateSetupState.prototype = {
 		this.cancelButton.label.setStyle({ font: '24px ' + this.game.theme.font, fill: '#000000', align: 'center' }, true);
 		
 		this.game.world.add(this.cancelButton);
+		
+		this.game.add.tween(this.sprite).from({ alpha: 0}, 500, Phaser.Easing.Linear.NONE, true, 1000, 0, false);
+		this.game.add.tween(this.titleLabel).from({ alpha: 0}, 500, Phaser.Easing.Linear.NONE, true, 1000, 0, false);
+		this.game.add.tween(this.infoLabel).from({ alpha: 0}, 500, Phaser.Easing.Linear.NONE, true, 1000, 0, false);
+		this.game.add.tween(this.loginButton).from({ alpha: 0}, 500, Phaser.Easing.Linear.NONE, true, 1000, 0, false);
+		this.game.add.tween(this.cancelButton).from({ alpha: 0}, 500, Phaser.Easing.Linear.NONE, true, 1000, 0, false);
 	},
 	login: function() {
 		this.game.service.authenticate().then(_.bind(this.onData, this));

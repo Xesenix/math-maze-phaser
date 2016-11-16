@@ -9,8 +9,8 @@
 	var IntroState = require('./states/intro.js');
 	var game = new Phaser.Game(800, 600, Phaser.AUTO, 'game');
 	
-	var ServiceSetupState = require('./states/kongregate.js');
-	var ServiceApi = require('./kongregate/api.js');
+	var ServiceSetupState = require('./states/gamejolt.js');
+	var ServiceApi = require('./gamejolt/api.js');
 	
 	game.service = ServiceApi;
 	

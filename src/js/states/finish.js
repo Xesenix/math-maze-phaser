@@ -43,7 +43,7 @@ var localization = new Localize({
 	'You overshot $[1] target $[2]!': {
 		pl: 'Zbyt duży wynik $[1] cel $[2]!'
 	},
-	'Repeate (R)': {
+	'Repeat (R)': {
 		pl: 'Powtórz (R)'
 	},
 	'Menu (ESC)': {
@@ -88,7 +88,7 @@ Finish.prototype = {
 			this.world.centerX - 5,
 			this.world.height - 10,
 			'btn',
-			localization.translate('Repeate (R)'),
+			localization.translate('Repeat (R)'),
 			_.bind(this.repeat, this),
 			this
 		);
@@ -294,6 +294,8 @@ Finish.prototype = {
 	next: function () {
 		if (this.result.value === this.target.value) {
 			if (this.difficulty.unlocked === this.level) {
+				// console.log('scores: ', this.isPerfect, this.result, this.target, this.difficulty);
+				
 				this.difficulty.unlocked ++;
 				this.difficulty.points += this.points;
 				

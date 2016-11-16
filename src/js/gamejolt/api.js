@@ -1,5 +1,8 @@
 'use strict';
 /* global window, XMLHttpRequest */
+var merge = require('lodash/merge');
+var each = require('lodash/each');
+var bind = require('lodash/bind');
 var Promise = require('promise');
 var url = require('url');
 var md5 = require('js-md5');
@@ -76,7 +79,7 @@ var API = {
 	},
 	setData: function(key, data) {
 		// game data is stored on Gamejolt web so we need to send ajax request
-		var uri = 'http://gamejolt.com/api/game/v1/data-store/set/?game_id=' + settings.gameId + '&key=' + key + '&data=' + data + '&format=json';
+		var uri = 'http://gamejolt.com/api/game/v1/data-store/set/?game_id=' + settings.gameId + '&key=' + key + '&data=' + JSON.stringify(data) + '&format=json';
 
 		return API.sendRequest(uri);
 	},
@@ -96,10 +99,12 @@ var API = {
 				if (API.user.guest) {
 					return FalbackAPI.setUserData(key, data);
 				} else {
-					var uri = 'http://gamejolt.com/api/game/v1/data-store/set/?game_id=' + settings.gameId + '&username=' + API.user.username + '&user_token=' + API.user.token + '&key=' + key + '&data=' + data + '&format=json';
+					var uri = 'http://gamejolt.com/api/game/v1/data-store/set/?game_id=' + settings.gameId + '&username=' + API.user.username + '&user_token=' + API.user.token + '&key=' + key + '&data=' + JSON.stringify(data) + '&format=json';
 
 					return API.sendRequest(uri);
 				}
+			}, function() {
+				console.log('getUser error');
 			});
 	},
 	getUserData: function(key, defaultValue) {
@@ -113,7 +118,9 @@ var API = {
 
 					return API.sendRequest(uri)
 						.then(function(result) {
-							return result || defaultValue;
+							return FalbackAPI.getUserData(key).then(function(backupData) {
+								return merge(backupData, JSON.parse(result.response.data)) || defaultValue;
+							});
 						});
 				}
 			});
@@ -145,8 +152,13 @@ var API = {
 				}
 			});
 	},
-	setScores: function() {
-		// TODO: implement 
+	setScores: function(values) {
+		return new Promise(bind(function(resolve) {
+			each(values, bind(function(value, key) {
+				this.setScore(key, value);
+			}, this));
+			resolve();
+		}, this));
 	},
 	getScore: function() {
 		// TODO: implement 

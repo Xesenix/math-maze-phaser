@@ -1,5 +1,5 @@
 'use strict';
-/* global Phaser, localStorage */
+/* global Phaser */
 var _ = require('lodash');
 var LabelButton = require('../components/label_button.js');
 var MuteButton = require('../components/mute_button.js');
@@ -204,7 +204,7 @@ Menu.prototype = {
 		this.game.add.tween(this.insaneButton)
 			.to({ x: this.insaneButton.x - 10}, 100, Phaser.Easing.Linear.InOut, true, 200, 1, true);
 		
-		localStorage.setItem('gameSave', JSON.stringify({}));
+		this.game.dataStorage.setUserData('gameSave', {});
 	},
 	update: function() {
 
