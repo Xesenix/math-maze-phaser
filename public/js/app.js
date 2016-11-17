@@ -47631,6 +47631,26 @@ var API = {
 	init: function() {
 		return this.getUser();
 	},
+	authenticate: function(username, token) {
+		API.user = {
+			username: username || '',
+			token: token || '',
+			guest: true
+		};
+		return API.sendRequest('http://gamejolt.com/api/game/v1/users/auth/?game_id=' + settings.gameId + '&username=' + API.user.username + '&user_token=' + API.user.token + '&format=json')
+			.then(function(result) {
+				console.log('authenticated ', result);
+				if (result.response.success === "true") {
+					API.user.guest = false;
+				}
+				return API.user;
+			})
+			.catch(function() {
+				console.log('not authenticated ');
+				API.user = null;
+				return API.user;
+			});
+	},
 	user: null,
 	sendRequest: function(uri) {
 		// helper method for building and sending ajax requests to Gamejolt API 
@@ -47696,7 +47716,6 @@ var API = {
 		// user data is stored on Gamejolt web so we need to send ajax request
 		return API.getUser()
 			.then(function() {
-				console.log('getUser');
 				if (API.user.guest) {
 					return FalbackAPI.setUserData(key, data);
 				} else {
@@ -47712,7 +47731,6 @@ var API = {
 		// user data is stored on Gamejolt web so we need to send ajax request
 		return API.getUser()
 			.then(function() {
-				console.log('getUserData ?', API.user);
 				if (API.user.guest) {
 					return FalbackAPI.getUserData(key);
 				} else {
@@ -47743,7 +47761,6 @@ var API = {
 		// scores are set on Gamejolt web so we need to send ajax request
 		return API.getUser()
 			.then(function() {
-				console.log('score', score, value);
 				var uri = 'http://gamejolt.com/api/game/v1/scores/add/?game_id=' + settings.gameId + '&username=' + API.user.username + '&user_token=' + API.user.token + '&sort=' + value + '&format=json';
 				
 				if (typeof settings.scoresTables[score] !== 'undefined') {
@@ -48497,8 +48514,16 @@ GamejoltSetupState.prototype = {
 		this.game.world.add(this.cancelButton);
 	},
 	login: function() {
-		console.log('on login ');
-		this.game.user = ServiceApi.user;
+		this.game.service
+			.authenticate(this.usernameInput.value, this.tokenInput.value)
+			.then(_.bind(function () {
+				console.log('getting data', ServiceApi.user);
+				if (ServiceApi.user !== null && !ServiceApi.user.guest) {
+					return this.game.service.getUserData('gameSave');
+				}
+				this.onError('not logged in');
+			}, this))
+			.then(_.bind(this.onData, this));
 	},
 	cancel: function() {
 		console.log('on cancel ');
@@ -48506,31 +48531,34 @@ GamejoltSetupState.prototype = {
 	},
 	onData: function(gameSave) {
 		console.log('on data ', gameSave);
-		
-		this.game.mode = _.merge(this.game.mode, gameSave.progress);
-		
-		if (ServiceApi.user !== null) {
-			if (!ServiceApi.user.guest) {
-				this.game.service.setScores({
-					'EasyLevel': this.game.mode.easy.unlocked,
-					'MediumLevel': this.game.mode.medium.unlocked,
-					'HardLevel': this.game.mode.hard.unlocked,
-					'InsaneLevel': this.game.mode.insane.unlocked,
-					'TotalLevel': this.game.mode.easy.unlocked + this.game.mode.medium.unlocked + this.game.mode.hard.unlocked + this.game.mode.insane.unlocked,
-					'EasyPoints': this.game.mode.easy.points,
-					'MediumPoints': this.game.mode.medium.points,
-					'HardPoints': this.game.mode.hard.points,
-					'InsanePoints': this.game.mode.insane.points,
-					'TotalPoints': this.game.mode.easy.points + this.game.mode.medium.points + this.game.mode.hard.points + this.game.mode.insane.points,
-					'EasyPerfect': this.game.mode.easy.perfect,
-					'MediumPerfect': this.game.mode.medium.perfect,
-					'HardPerfect': this.game.mode.hard.perfect,
-					'InsanePerfect': this.game.mode.insane.perfect,
-					'TotalPerfect': this.game.mode.easy.perfect + this.game.mode.medium.perfect + this.game.mode.hard.perfect + this.game.mode.insane.perfect
-				});
-				
-				this.game.state.start('menu');
+		if (gameSave && gameSave.progress) {
+			this.game.mode = _.merge(this.game.mode, gameSave.progress);
+
+			if (ServiceApi.user !== null) {
+				if (!ServiceApi.user.guest) {
+					this.game.service.setScores({
+						'EasyLevel': this.game.mode.easy.unlocked,
+						'MediumLevel': this.game.mode.medium.unlocked,
+						'HardLevel': this.game.mode.hard.unlocked,
+						'InsaneLevel': this.game.mode.insane.unlocked,
+						'TotalLevel': this.game.mode.easy.unlocked + this.game.mode.medium.unlocked + this.game.mode.hard.unlocked + this.game.mode.insane.unlocked,
+						'EasyPoints': this.game.mode.easy.points,
+						'MediumPoints': this.game.mode.medium.points,
+						'HardPoints': this.game.mode.hard.points,
+						'InsanePoints': this.game.mode.insane.points,
+						'TotalPoints': this.game.mode.easy.points + this.game.mode.medium.points + this.game.mode.hard.points + this.game.mode.insane.points,
+						'EasyPerfect': this.game.mode.easy.perfect,
+						'MediumPerfect': this.game.mode.medium.perfect,
+						'HardPerfect': this.game.mode.hard.perfect,
+						'InsanePerfect': this.game.mode.insane.perfect,
+						'TotalPerfect': this.game.mode.easy.perfect + this.game.mode.medium.perfect + this.game.mode.hard.perfect + this.game.mode.insane.perfect
+					});
+
+					this.game.state.start('menu');
+				}
 			}
+		} else if (ServiceApi.user !== null && !ServiceApi.user.guest) {
+			this.game.state.start('menu');
 		}
 	},
 	onError: function(response) {

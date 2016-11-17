@@ -31,6 +31,26 @@ var API = {
 	init: function() {
 		return this.getUser();
 	},
+	authenticate: function(username, token) {
+		API.user = {
+			username: username || '',
+			token: token || '',
+			guest: true
+		};
+		return API.sendRequest('http://gamejolt.com/api/game/v1/users/auth/?game_id=' + settings.gameId + '&username=' + API.user.username + '&user_token=' + API.user.token + '&format=json')
+			.then(function(result) {
+				console.log('authenticated ', result);
+				if (result.response.success === "true") {
+					API.user.guest = false;
+				}
+				return API.user;
+			})
+			.catch(function() {
+				console.log('not authenticated ');
+				API.user = null;
+				return API.user;
+			});
+	},
 	user: null,
 	sendRequest: function(uri) {
 		// helper method for building and sending ajax requests to Gamejolt API 
